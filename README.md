@@ -18,8 +18,6 @@
 2. 打开本仓库的 `linux.sb-ai-reply.user.js`，点右上角 **Raw** 按钮，Tampermonkey 会自动识别并弹出安装窗口
 3. 确认安装即可
 
-> 也可直接访问 raw 链接安装：`https://raw.githubusercontent.com/<你的用户名>/<仓库名>/main/linux.sb-ai-reply.user.js`
-
 ## 配置
 
 打开任意帖子页（如 `https://linux.sb/topic/11236`），点右下角「水贴专用」→ 展开「设置」，填入：
@@ -42,10 +40,7 @@
 
 > 注意：`填入编辑器` 需要你**已登录 linux.sb**，否则页面只有「登录后回复」，没有回复框。
 
-## 截图
 
-<!-- 发布前替换为你的脚本界面截图 -->
-![界面截图](https://example.com/a.jpg)
 
 ## 关于 `@connect *`
 
