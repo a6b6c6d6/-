@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.1.0
+// @version      2.2.0
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -10,6 +10,8 @@
 // @grant        GM_getValue
 // @grant        GM_addStyle
 // @connect      *
+// @updateURL    https://raw.githubusercontent.com/a6b6c6d6/lzsb-smart-water-sticker/main/linux.sb-ai-reply.user.js
+// @downloadURL  https://raw.githubusercontent.com/a6b6c6d6/lzsb-smart-water-sticker/main/linux.sb-ai-reply.user.js
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -55,7 +57,8 @@
     temperature: 0.8,
     maxTokens: 800,
     maxContextChars: 20000,
-    includeSpeaker: true
+    includeSpeaker: true,
+    enableImage: true // 多模态：抓取正文图片一起喂给模型（需模型支持视觉）
   };
 
   /* ============================================================
@@ -89,7 +92,6 @@
       bottom: 80px;
       width: 380px;
       max-width: calc(100vw - 32px);
-      max-height: calc(100vh - 120px);
       z-index: 2147483001;
       display: flex;
       flex-direction: column;
@@ -105,6 +107,7 @@
     #${PANEL_ID}.lsb-hidden { display: none; }
 
     .lsb-ai-header {
+      flex: 0 0 auto;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -128,11 +131,17 @@
     .lsb-ai-close:hover { background: #e5e7eb; color: #111827; }
 
     .lsb-ai-body {
+      flex: 0 0 auto;
+      max-height: calc(100vh - 170px);
       padding: 12px 14px;
       overflow-y: auto;
+      overscroll-behavior: contain;
       display: flex;
       flex-direction: column;
       gap: 10px;
+    }
+    .lsb-ai-body > * {
+      flex-shrink: 0;
     }
 
     .lsb-ai-row { display: flex; flex-direction: column; gap: 4px; }
@@ -330,19 +339,41 @@
   }
 
   // 克隆节点并移除图片、按钮、编辑提示等非正文元素
-  function cleanNode(node) {
+  // enableImage 为 true 时保留正文图片（供多模态使用），仅移除头像/表情类图片
+  function cleanNode(node, enableImage) {
     const clone = node.cloneNode(true);
     const removeSelectors = [
-      'img', 'picture', 'iframe', 'video', 'audio', 'svg',
+      'picture', 'iframe', 'video', 'audio', 'svg',
       'script', 'style', 'button', 'form', 'nav',
       '.sb-limit-edit-time-note', '.post-signature', '.signature',
       '.post-menu-area', '.like-button', '.actions',
       '[data-ember-action]'
     ];
+    if (!enableImage) removeSelectors.push('img');
     removeSelectors.forEach(sel => {
       clone.querySelectorAll(sel).forEach(el => el.remove());
     });
+    // 多模态模式下仍剔除头像、表情等非正文图片
+    if (enableImage) {
+      clone.querySelectorAll('img[src*="avatar"], img[src*="bottts"], img.emoji').forEach(el => el.remove());
+    }
     return clone;
+  }
+
+  // 收集正文图片 URL（过滤头像、拼完整地址、去 data:）
+  function collectImages(contentNode) {
+    const urls = [];
+    contentNode.querySelectorAll('img').forEach(img => {
+      let src = img.getAttribute('src') || '';
+      if (!src) return;
+      if (/avatar|bottts/i.test(src)) return;
+      if (src.startsWith('data:')) return;
+      if (src.startsWith('//')) src = 'https:' + src;
+      else if (src.startsWith('/')) src = location.origin + src;
+      else if (!/^https?:\/\//i.test(src)) return;
+      urls.push(src);
+    });
+    return urls;
   }
 
   // 将清洗后的节点转换为 Markdown 文本
@@ -379,6 +410,12 @@
         return;
       }
       if (tag === 'br') { out.push('\n'); return; }
+      if (tag === 'img') {
+        // 多模态模式下图片保留为占位，URL 已单独收集
+        const alt = (n.getAttribute('alt') || '').trim();
+        out.push(alt ? '[' + alt + ']' : '[图片]');
+        return;
+      }
       if (/^h[1-6]$/.test(tag)) {
         out.push('\n**' + n.textContent.trim() + '**\n');
         return;
@@ -397,8 +434,8 @@
     return out.join('');
   }
 
-  // 根据范围抓取并返回清洗后的 Markdown 文本
-  function scrapePosts(scope, includeSpeaker, maxChars) {
+  // 根据范围抓取并返回清洗后的 Markdown 文本 + 图片列表
+  function scrapePosts(scope, includeSpeaker, maxChars, enableImage) {
     const posts = getPosts();
     if (!posts.length) {
       throw new Error('未识别到帖子内容，请确认当前页面是帖子页（/topic/...）');
@@ -419,10 +456,15 @@
     }
 
     const parts = [];
+    const imageUrls = [];
     for (const post of selected) {
       const content = getContent(post);
       if (!content) continue;
-      const cleaned = cleanNode(content);
+      // 多模态：清洗前先收集正文图片
+      if (enableImage) {
+        collectImages(content).forEach(u => imageUrls.push(u));
+      }
+      const cleaned = cleanNode(content, enableImage);
       let md = extractMarkdown(cleaned);
       md = md.replace(/[ \t]+\n/g, '\n');
       md = collapseBlankLines(md);
@@ -449,7 +491,8 @@
     if (title) text = '【主题】' + title + '\n\n' + text;
 
     const r = truncateText(text, maxChars);
-    return r;
+    const images = Array.from(new Set(imageUrls)).slice(0, 10); // 最多附带 10 张图，防止 token 爆炸
+    return { text: r.text, truncated: r.truncated, images };
   }
 
   /* ============================================================
@@ -502,28 +545,37 @@
     return msg + detail;
   }
 
-  function requestAI(cfg, userContent) {
+  function requestAI(cfg, userContent, images) {
     return new Promise((resolve, reject) => {
       const isChat = cfg.apiFormat === 'chat';
       const url = joinUrl(cfg.baseUrl, isChat ? 'chat/completions' : 'responses');
+      const useImages = !!cfg.enableImage && Array.isArray(images) && images.length > 0;
 
       let body;
       if (isChat) {
+        // Chat Completions：content 数组里图片用 image_url 对象
+        const content = useImages
+          ? [{ type: 'text', text: userContent }].concat(images.map(u => ({ type: 'image_url', image_url: { url: u } })))
+          : userContent;
         body = {
           model: cfg.model,
           messages: [
             { role: 'system', content: cfg.systemPrompt },
-            { role: 'user', content: userContent }
+            { role: 'user', content: content }
           ],
           temperature: cfg.temperature,
           max_tokens: cfg.maxTokens
         };
       } else {
+        // Responses API：content 数组里图片用 input_image，image_url 为字符串
+        const content = useImages
+          ? [{ type: 'input_text', text: userContent }].concat(images.map(u => ({ type: 'input_image', image_url: u })))
+          : userContent;
         body = {
           model: cfg.model,
           instructions: cfg.systemPrompt,
           input: [
-            { role: 'user', content: userContent }
+            { role: 'user', content: content }
           ],
           temperature: cfg.temperature,
           max_output_tokens: cfg.maxTokens
@@ -604,7 +656,8 @@
       temperature: Math.min(2, Math.max(0, num('temperature', DEFAULTS.temperature))),
       maxTokens: num('maxTokens', DEFAULTS.maxTokens),
       maxContextChars: num('maxContextChars', DEFAULTS.maxContextChars),
-      includeSpeaker: $('includeSpeaker').checked
+      includeSpeaker: $('includeSpeaker').checked,
+      enableImage: $('enableImage').checked
     };
   }
 
@@ -619,6 +672,7 @@
     $('maxTokens').value = cfg.maxTokens;
     $('maxContextChars').value = cfg.maxContextChars;
     $('includeSpeaker').checked = !!cfg.includeSpeaker;
+    $('enableImage').checked = !!cfg.enableImage;
   }
 
   function validateConfig(cfg) {
@@ -699,6 +753,10 @@
             <div class="lsb-ai-check-row">
               <input type="checkbox" id="lsb-ai-cfg-includeSpeaker">
               <label for="lsb-ai-cfg-includeSpeaker">抓取内容中包含发言人标识（【楼主/用户：xxx】）</label>
+            </div>
+            <div class="lsb-ai-check-row">
+              <input type="checkbox" id="lsb-ai-cfg-enableImage">
+              <label for="lsb-ai-cfg-enableImage">抓取正文图片（多模态，需模型支持视觉）</label>
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">系统提示词</label>
@@ -841,7 +899,7 @@
 
     let scraped;
     try {
-      scraped = scrapePosts(scope, cfg.includeSpeaker, cfg.maxContextChars);
+      scraped = scrapePosts(scope, cfg.includeSpeaker, cfg.maxContextChars, cfg.enableImage);
     } catch (e) {
       setStatus(e.message, 'error');
       return;
@@ -856,10 +914,11 @@
 
     try {
       const userContent = buildUserContent(scraped.text);
-      const reply = await requestAI(cfg, userContent);
+      const reply = await requestAI(cfg, userContent, scraped.images);
       previewEl.value = reply;
       previewEl.classList.add('lsb-success');
-      setStatus('生成成功，可手动修改后点击「填入编辑器」', 'ok');
+      const imgNote = (scraped.images && scraped.images.length) ? ('（已附带 ' + scraped.images.length + ' 张图片）') : '';
+      setStatus('生成成功' + imgNote + '，可手动修改后点击「填入编辑器」', 'ok');
     } catch (e) {
       setStatus(e.message || '生成失败', 'error');
     } finally {
