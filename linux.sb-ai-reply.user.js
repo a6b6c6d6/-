@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.2.0
+// @version      2.3.0
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -285,6 +285,36 @@
 
   function collapseBlankLines(s) {
     return s.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // 解析算术题（如 "4 × 7 = ?"）返回结果字符串，无法解析返回 null。
+  // 支持 + - × ÷（也兼容 * / 和中文全角符号），支持整数、小数、负数。
+  function solveArithmetic(question) {
+    if (!question) return null;
+    const cleaned = String(question)
+      .replace(/[？?=]/g, '')   // 去掉问号、等号
+      .replace(/×/g, '*')       // 乘号统一成 *
+      .replace(/÷/g, '/')       // 除号统一成 /
+      .replace(/[−–—]/g, '-')   // 各种横杠统一成 -
+      .trim();
+    // 只匹配「一个数 运算符 一个数」的二元运算
+    const m = cleaned.match(/^\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*$/);
+    if (!m) return null;
+    const a = parseFloat(m[1]);
+    const op = m[2];
+    const b = parseFloat(m[3]);
+    if (op === '/' && b === 0) return null; // 除零保护
+    let result;
+    switch (op) {
+      case '+': result = a + b; break;
+      case '-': result = a - b; break;
+      case '*': result = a * b; break;
+      case '/': result = a / b; break;
+      default: return null;
+    }
+    // 整数直接输出整数，小数保留 4 位并去掉多余 0
+    if (Number.isInteger(result)) return String(result);
+    return String(parseFloat(result.toFixed(4)));
   }
 
   /* ============================================================
@@ -861,6 +891,18 @@
     return !document.querySelector('.reply-login-box');
   }
 
+  // 抽奖帖：自动解析算术题并填入答案，返回是否成功。
+  // 只负责「算术题 → 答案」，不碰 PoW（浏览器 JS 自动跑）、蜜罐字段、服务端 token。
+  function autoFillCaptcha() {
+    const questionEl = document.querySelector('.native-captcha-question');
+    const answerEl = document.querySelector('.native-captcha-answer');
+    if (!questionEl || !answerEl) return false;
+    const answer = solveArithmetic(questionEl.textContent);
+    if (answer == null) return false;
+    setNativeValue(answerEl, answer);
+    return true;
+  }
+
   function fillEditor(text) {
     if (!isLoggedIn()) {
       setStatus('当前未登录，页面只有「登录后回复」。请先登录 linux.sb 再点击「填入编辑器」', 'error');
@@ -876,7 +918,12 @@
     setNativeValue(ed, text);
     try { ed.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
     ed.focus();
-    setStatus('已填入回复编辑器，可继续编辑或直接提交', 'ok');
+
+    // 抽奖帖：顺带自动算好人机验证的算术答案（普通帖子没有验证框，这一步自然跳过）
+    const captchaDone = autoFillCaptcha();
+    setStatus(captchaDone
+      ? '已填入回复，并自动算好算术答案，确认无误后直接点「回复」提交'
+      : '已填入回复编辑器，可继续编辑或直接提交', 'ok');
   }
 
   /* ============================================================
