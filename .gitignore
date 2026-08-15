@@ -1,0 +1,12 @@
+# WorkBuddy 项目数据（记忆、会话记录等，不入版本库）
+.workbuddy/
+
+# 临时文件
+.tmp-*
+*.tmp
+*.log
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+.DS_Store
