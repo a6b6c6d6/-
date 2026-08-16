@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.4.9
+// @version      2.5.0
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -67,14 +67,15 @@
     baseUrl: '',
     apiKey: '',
     model: '',
-    apiFormat: 'responses', // 'responses' | 'chat'
+    apiFormat: 'responses', // 'responses' | 'chat' | 'anthropic'
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     replySystemPrompt: DEFAULT_REPLY_SYSTEM_PROMPT,
     temperature: 0.8,
     maxTokens: 800,
     maxContextChars: 20000,
     includeSpeaker: true,
-    enableImage: true // 多模态：抓取正文图片一起喂给模型（需模型支持视觉）
+    enableImage: true, // 多模态：抓取正文图片一起喂给模型（需模型支持视觉）
+    enableSearch: false // 联网搜索：需中转站/模型支持（responses 或 anthropic 格式）
   };
 
   /* ============================================================
@@ -332,7 +333,7 @@
     cfg.temperature = Number(cfg.temperature);
     cfg.maxTokens = Number(cfg.maxTokens);
     cfg.maxContextChars = Number(cfg.maxContextChars);
-    if (!(cfg.apiFormat === 'chat')) cfg.apiFormat = 'responses';
+    if (!['responses', 'chat', 'anthropic'].includes(cfg.apiFormat)) cfg.apiFormat = 'responses';
     return cfg;
   }
 
@@ -835,6 +836,37 @@
     return String(content);
   }
 
+  // Anthropic 非流式（普通 JSON）响应解析：收集 content 里 type=text 的片段
+  function parseAnthropicJson(data) {
+    if (!data || !Array.isArray(data.content)) {
+      throw new Error('响应结构不合法：未找到 content 数组');
+    }
+    const chunks = [];
+    for (const c of data.content) {
+      if (c && c.type === 'text' && c.text != null) chunks.push(c.text);
+    }
+    if (!chunks.length) throw new Error('响应内容为空：content 中无 text 片段');
+    return chunks.join('');
+  }
+
+  // Anthropic SSE 流式响应解析：收集 content_block_delta 里的 text_delta
+  function parseAnthropicSse(text) {
+    const chunks = [];
+    const lines = String(text || '').split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      let obj;
+      try { obj = JSON.parse(payload); } catch (e) { continue; }
+      if (obj && obj.type === 'content_block_delta' && obj.delta && obj.delta.type === 'text_delta' && obj.delta.text != null) {
+        chunks.push(obj.delta.text);
+      }
+    }
+    if (!chunks.length) throw new Error('响应内容为空：SSE 流中无 text_delta');
+    return chunks.join('');
+  }
+
   function apiErrorMessage(status, bodyText) {
     let msg = '请求失败';
     if (status === 0) msg = '网络错误，请检查网络连接或 Base URL 是否可访问';
@@ -857,13 +889,38 @@
 
   function requestAI(cfg, userContent, images) {
     return new Promise((resolve, reject) => {
+      const isAnthropic = cfg.apiFormat === 'anthropic';
       const isChat = cfg.apiFormat === 'chat';
-      const url = joinUrl(cfg.baseUrl, isChat ? 'chat/completions' : 'responses');
       const useImages = !!cfg.enableImage && Array.isArray(images) && images.length > 0;
+      const useSearch = !!cfg.enableSearch;
 
-      let body;
-      if (isChat) {
-        // Chat Completions：content 数组里图片用 image_url 对象
+      let url, headers, body;
+
+      if (isAnthropic) {
+        // Anthropic Messages API（/v1/messages）
+        url = joinUrl(cfg.baseUrl, 'messages');
+        headers = {
+          'x-api-key': cfg.apiKey,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json'
+        };
+        const content = useImages
+          ? [{ type: 'text', text: userContent }].concat(images.map(u => ({ type: 'image', source: { type: 'url', url: u } })))
+          : userContent;
+        body = {
+          model: cfg.model,
+          max_tokens: cfg.maxTokens,
+          system: cfg.systemPrompt,
+          messages: [{ role: 'user', content: content }],
+          temperature: cfg.temperature
+        };
+        if (useSearch) {
+          body.tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }];
+        }
+      } else if (isChat) {
+        // Chat Completions（/v1/chat/completions）
+        url = joinUrl(cfg.baseUrl, 'chat/completions');
+        headers = { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' };
         const content = useImages
           ? [{ type: 'text', text: userContent }].concat(images.map(u => ({ type: 'image_url', image_url: { url: u } })))
           : userContent;
@@ -876,48 +933,56 @@
           temperature: cfg.temperature,
           max_tokens: cfg.maxTokens
         };
+        if (useSearch) {
+          body.tools = [{ type: 'web_search' }];
+        }
       } else {
-        // Responses API：content 数组里图片用 input_image，image_url 为字符串
+        // Responses API（/v1/responses）
+        url = joinUrl(cfg.baseUrl, 'responses');
+        headers = { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' };
         const content = useImages
           ? [{ type: 'input_text', text: userContent }].concat(images.map(u => ({ type: 'input_image', image_url: u })))
           : userContent;
         body = {
           model: cfg.model,
           instructions: cfg.systemPrompt,
-          input: [
-            { role: 'user', content: content }
-          ],
+          input: [{ role: 'user', content: content }],
           temperature: cfg.temperature,
           max_output_tokens: cfg.maxTokens
         };
+        if (useSearch) {
+          body.tools = [{ type: 'web_search' }];
+        }
       }
 
       GM_xmlhttpRequest({
         method: 'POST',
         url: url,
         timeout: 180000, // 180 秒
-        headers: {
-          'Authorization': 'Bearer ' + cfg.apiKey,
-          'Content-Type': 'application/json'
-        },
+        headers: headers,
         data: JSON.stringify(body),
         onload: (resp) => {
           const status = resp.status;
-          let data;
-          try {
-            data = JSON.parse(resp.responseText);
-          } catch (e) {
-            data = null;
-          }
+          const raw = resp.responseText || '';
           if (status >= 200 && status < 300) {
             try {
-              const text = isChat ? parseChat(data) : parseResponses(data);
+              let text;
+              if (isAnthropic) {
+                // Anthropic 兼容 SSE 流式和普通 JSON 两种响应
+                text = raw.trimStart().startsWith('{')
+                  ? parseAnthropicJson(JSON.parse(raw))
+                  : parseAnthropicSse(raw);
+              } else if (isChat) {
+                text = parseChat(JSON.parse(raw));
+              } else {
+                text = parseResponses(JSON.parse(raw));
+              }
               resolve(text.trim());
             } catch (e) {
-              reject(new Error(e.message));
+              reject(new Error(e.message || '响应解析失败'));
             }
           } else {
-            reject(new Error(apiErrorMessage(status, resp.responseText || '')));
+            reject(new Error(apiErrorMessage(status, raw)));
           }
         },
         onerror: () => reject(new Error('网络错误，请求未能完成，请检查网络或 Base URL')),
@@ -972,7 +1037,8 @@
       maxTokens: num('maxTokens', DEFAULTS.maxTokens),
       maxContextChars: num('maxContextChars', DEFAULTS.maxContextChars),
       includeSpeaker: $('includeSpeaker').checked,
-      enableImage: $('enableImage').checked
+      enableImage: $('enableImage').checked,
+      enableSearch: $('enableSearch').checked
     };
   }
 
@@ -989,6 +1055,7 @@
     $('maxContextChars').value = cfg.maxContextChars;
     $('includeSpeaker').checked = !!cfg.includeSpeaker;
     $('enableImage').checked = !!cfg.enableImage;
+    $('enableSearch').checked = !!cfg.enableSearch;
   }
 
   function validateConfig(cfg) {
@@ -1059,6 +1126,7 @@
               <select class="lsb-ai-select" id="lsb-ai-cfg-apiFormat">
                 <option value="responses">Responses API（/responses）</option>
                 <option value="chat">Chat Completions（/chat/completions）</option>
+                <option value="anthropic">Anthropic Messages（/messages）</option>
               </select>
             </div>
             <div class="lsb-ai-number-row">
@@ -1082,6 +1150,10 @@
             <div class="lsb-ai-check-row">
               <input type="checkbox" id="lsb-ai-cfg-enableImage">
               <label for="lsb-ai-cfg-enableImage">抓取正文图片（多模态，需模型支持视觉）</label>
+            </div>
+            <div class="lsb-ai-check-row">
+              <input type="checkbox" id="lsb-ai-cfg-enableSearch">
+              <label for="lsb-ai-cfg-enableSearch">联网搜索（需中转站/模型支持，建议配合 Responses 或 Anthropic 格式）</label>
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">系统提示词（水贴 · 总结式回帖）</label>
