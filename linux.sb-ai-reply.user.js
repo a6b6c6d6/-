@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.5.1
+// @version      2.5.2
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -887,12 +887,17 @@
     return msg + detail;
   }
 
+  // 联网搜索使用指导（开关打开时附加到系统提示词末尾，引导 AI 自主判断该不该搜、搜什么）
+  const SEARCH_GUIDANCE = '\n\n【联网搜索使用说明】你拥有联网搜索工具。请仅在确实需要实时信息或外部知识时才使用它（例如帖子涉及最近发生的事件、最新版本、实时数据、当前热点等）。使用前请先提炼帖子核心主题作为搜索关键词，不要把整段帖子内容当作搜索词。对于通用知识类话题（Linux、编程、教程、生活经验等）通常无需联网。';
+
   function requestAI(cfg, userContent, images) {
     return new Promise((resolve, reject) => {
       const isAnthropic = cfg.apiFormat === 'anthropic';
       const isChat = cfg.apiFormat === 'chat';
       const useImages = !!cfg.enableImage && Array.isArray(images) && images.length > 0;
       const useSearch = !!cfg.enableSearch;
+      // 联网时附加搜索使用指导，让 AI 自主判断是否搜索、提炼关键词
+      const sysPrompt = useSearch ? (cfg.systemPrompt + SEARCH_GUIDANCE) : cfg.systemPrompt;
 
       let url, headers, body;
 
@@ -910,7 +915,7 @@
         body = {
           model: cfg.model,
           max_tokens: cfg.maxTokens,
-          system: cfg.systemPrompt,
+          system: sysPrompt,
           messages: [{ role: 'user', content: content }],
           temperature: cfg.temperature
         };
@@ -927,7 +932,7 @@
         body = {
           model: cfg.model,
           messages: [
-            { role: 'system', content: cfg.systemPrompt },
+            { role: 'system', content: sysPrompt },
             { role: 'user', content: content }
           ],
           temperature: cfg.temperature,
@@ -945,7 +950,7 @@
           : userContent;
         body = {
           model: cfg.model,
-          instructions: cfg.systemPrompt,
+          instructions: sysPrompt,
           input: [{ role: 'user', content: content }],
           temperature: cfg.temperature,
           max_output_tokens: cfg.maxTokens
