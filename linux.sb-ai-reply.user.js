@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.4.7
+// @version      2.4.8
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1215,16 +1215,11 @@
       return;
     }
 
-    // 回应模式且有 @ 关系：模拟点击目标评论的「引用回复」按钮，让论坛自动加 @前缀并定位
-    if (currentTarget && replyPrefix) {
-      const quoteBtn = currentTarget.post.querySelector('.quote-reply');
-      if (quoteBtn) quoteBtn.click(); // 论坛 JS 会往 ed.value 追加 "@用户名 #楼层 "
-    }
+    // 确保回复框可见（普通帖子的回复面板可能默认隐藏，先展开）
+    const panel = document.getElementById('reply') || (ed.closest ? ed.closest('.reply-panel') : null);
+    if (panel && panel.hidden) panel.hidden = false;
 
-    // 论坛引用回复已把 @前缀 加进 ed.value，把回应内容拼到其后
-    const existing = (currentTarget && replyPrefix && ed.value) ? ed.value : '';
-    setNativeValue(ed, existing + text);
-
+    setNativeValue(ed, text);
     try { ed.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
     ed.focus();
 
@@ -1362,7 +1357,8 @@
       setStatus('预览区为空，请先生成回复或手动输入内容', 'error');
       return;
     }
-    fillEditor(text);
+    // 回应模式（有 @ 关系）由脚本拼上 @前缀；总结式回复 replyPrefix 为空，不带前缀
+    fillEditor(replyPrefix + text);
   }
 
   /* ============================================================
