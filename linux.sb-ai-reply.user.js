@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.4.2
+// @version      2.4.3
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1321,24 +1321,51 @@
     return /\/topic\/\d+/i.test(location.pathname) || /\/t\//.test(location.pathname);
   }
 
+  // SPA 无刷新导航后，URL 变化但页面不重载，需要手动补初始化/补注入
+  function handleRouteChange() {
+    setTimeout(() => {
+      if (!isTopicPage()) return;
+      if (!document.getElementById(FAB_ID)) {
+        init();
+      } else {
+        injectWaterButtons(); // 帖子页之间切换，补注入新评论的按钮
+      }
+    }, 200);
+  }
+
+  // 拦截 history.pushState/replaceState + popstate，感知 SPA 导航
+  function setupSpaNavigation() {
+    if (window.__lsbSpaPatched) return;
+    window.__lsbSpaPatched = true;
+    ['pushState', 'replaceState'].forEach(m => {
+      const orig = history[m];
+      history[m] = function (...args) {
+        const r = orig.apply(this, args);
+        handleRouteChange();
+        return r;
+      };
+    });
+    window.addEventListener('popstate', handleRouteChange);
+  }
+
   function init() {
     if (!isTopicPage()) return;
     if (document.getElementById(FAB_ID)) return;
     try {
       buildPanel();
       injectWaterButtons();
-      // 评论可能是分页/懒加载，新评论出现时补注入「水它」按钮
+      // 评论可能是分页/懒加载/SPA 替换，监听整个 body 补注入「水它」按钮
       const mo = new MutationObserver(() => injectWaterButtons());
-      const list = document.querySelector('.topic-post-list');
-      mo.observe(list || document.body, { childList: true, subtree: true });
+      mo.observe(document.body, { childList: true, subtree: true });
     } catch (e) {
       console.error('[水贴专用] 初始化失败：', e && e.message ? e.message : e);
     }
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', () => { init(); setupSpaNavigation(); });
   } else {
     init();
+    setupSpaNavigation();
   }
 })();
