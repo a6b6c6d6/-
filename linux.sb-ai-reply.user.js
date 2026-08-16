@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.3.0
+// @version      2.4.0
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -218,6 +218,46 @@
     .lsb-ai-check-row input { margin: 0; }
     .lsb-ai-number-row { display: flex; gap: 10px; }
     .lsb-ai-number-row .lsb-ai-row { flex: 1; }
+
+    /* 每条评论旁注入的「水它」按钮 */
+    .lsb-water-btn {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 6px;
+      padding: 1px 7px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #2563eb;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background .12s ease, color .12s ease;
+      font-family: inherit;
+    }
+    .lsb-water-btn:hover { background: #dbeafe; color: #1d4ed8; }
+    .lsb-water-btn.lsb-active { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+    /* 选中的目标评论高亮 */
+    li.lsb-target-highlight {
+      outline: 2px solid #2563eb;
+      outline-offset: -2px;
+      background: #f0f7ff;
+      border-radius: 6px;
+    }
+
+    /* 面板里的目标状态条 */
+    .lsb-target-info {
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.5;
+      background: #f0f7ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      color: #1e40af;
+      word-break: break-all;
+    }
+    .lsb-target-info.lsb-empty { background: #f9fafb; border-color: #e5e7eb; color: #9ca3af; }
   `;
 
   if (typeof GM_addStyle === 'function') {
@@ -526,7 +566,165 @@
   }
 
   /* ============================================================
-   * 6. AI 调用模块
+   * 6. 目标评论 + 水回应模块（针对单条评论生成回应）
+   * ============================================================ */
+
+  // 当前选中的目标评论 { post, floor, username }
+  let currentTarget = null;
+
+  // 解析评论正文里的「@用户名 #楼层」提及。
+  // 烧饼社区的"引用回复"会在正文生成 @用户名 #楼层 前缀，这就是回复关系标记。
+  function parseMentions(post) {
+    const content = getContent(post);
+    if (!content) return [];
+    const text = content.textContent || '';
+    const mentions = [];
+    const re = /@(\S+?)\s*#(\d+)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      mentions.push({ username: m[1], floor: parseInt(m[2], 10) });
+    }
+    return mentions;
+  }
+
+  // 构建对话链：从目标评论出发，顺着 @ 关系递归追溯，收集所有相关评论。
+  // 终止条件：① 没有 @ 了 ② 楼层找不到（可能被删）③ 已访问过（防 a↔b 死循环）。
+  function buildReplyChain(targetPost, posts) {
+    const byFloor = new Map();
+    posts.forEach(p => {
+      const f = p.getAttribute('data-floor');
+      if (f) byFloor.set(f, p);
+    });
+
+    const collected = new Map(); // floor -> post（去重 + 防循环）
+    function collect(post) {
+      const floor = post.getAttribute('data-floor');
+      if (!floor) { // 首楼无 data-floor
+        collected.set('__first__', post);
+        return;
+      }
+      if (collected.has(floor)) return;
+      collected.set(floor, post);
+      for (const mt of parseMentions(post)) {
+        const parent = byFloor.get(String(mt.floor));
+        if (parent) collect(parent);
+      }
+    }
+    collect(targetPost);
+
+    // 按楼层顺序排（首楼最前）
+    const chain = Array.from(collected.values());
+    chain.sort((a, b) => {
+      const fa = a.getAttribute('data-floor');
+      const fb = b.getAttribute('data-floor');
+      if (!fa) return -1;
+      if (!fb) return 1;
+      return parseInt(fa, 10) - parseInt(fb, 10);
+    });
+    return chain;
+  }
+
+  // 渲染单条评论为文本（带发言人标识），复用现有的清洗逻辑
+  function renderPostText(post, firstPost, ownerUid, includeSpeaker, enableImage) {
+    const content = getContent(post);
+    if (!content) return '';
+    const cleaned = cleanNode(content, enableImage);
+    let md = extractMarkdown(cleaned);
+    md = md.replace(/[ \t]+\n/g, '\n');
+    md = collapseBlankLines(md);
+    if (!md) return '';
+    if (!includeSpeaker) return md;
+    const info = getAuthorInfo(post);
+    const role = isOwnerPost(post, ownerUid, firstPost) ? '楼主' : '用户';
+    const floor = post.hasAttribute('data-floor') ? ('#' + post.getAttribute('data-floor') + ' ') : '';
+    return '【' + floor + role + '：' + info.name + '】\n' + md;
+  }
+
+  // 针对目标评论抓取上下文：
+  // 有 @ 关系 → 帖子标题 + 完整对话链；无 @ → 帖子标题 + 首楼正文 + 目标评论。
+  function scrapeReplyTarget(target, includeSpeaker, maxChars, enableImage) {
+    const posts = getPosts();
+    const firstPost = findFirstPost(posts);
+    const ownerUid = getAuthorInfo(firstPost).uid;
+    const mentions = parseMentions(target.post);
+
+    let parts;
+    if (mentions.length > 0) {
+      // 有 @ 关系：对话链；无 @：只目标评论本身
+      const chain = mentions.length > 0 ? buildReplyChain(target.post, posts) : [target.post];
+      // 首楼始终放最前，作为帖子背景（若已在链中则跳过）
+      const ordered = [firstPost].concat(chain.filter(p => p !== firstPost));
+      parts = ordered.map(p => renderPostText(p, firstPost, ownerUid, includeSpeaker, enableImage)).filter(Boolean);
+    } else {
+      parts = [
+        renderPostText(firstPost, firstPost, ownerUid, includeSpeaker, enableImage),
+        renderPostText(target.post, firstPost, ownerUid, includeSpeaker, enableImage)
+      ].filter(Boolean);
+    }
+
+    if (!parts.length) throw new Error('目标评论内容为空，请确认已点「水它」选中评论');
+    let text = parts.join('\n\n---\n\n');
+    const title = getTopicTitle();
+    if (title) text = '【主题】' + title + '\n\n' + text;
+    const r = truncateText(text, maxChars);
+    return { text: r.text, truncated: r.truncated, hasMention: mentions.length > 0 };
+  }
+
+  // 针对评论的用户消息模板
+  function buildReplyUserContent(scrapedText, hasMention) {
+    if (hasMention) {
+      return '以下是论坛帖子里的一段对话（含帖子主题与相关楼层，每条已用【发言人】标识区分）。请针对其中「楼层最大、最后出现」的那条发言，写一条自然、口语化的中文回帖，观点要紧扣这段对话，不要跑题。请直接输出回帖正文，不要带 @ 前缀或任何解释。\n\n对话内容：\n' + scrapedText;
+    }
+    return '以下是论坛帖子的主题、正文，以及一条我准备回应的评论（每条已用【发言人】标识区分）。请针对「楼层最大、最后出现」的那条评论，写一条自然、口语化的中文回帖，可以赞同、补充、提问或给建议，观点要紧扣该评论。请直接输出回帖正文，不要带 @ 前缀或任何解释。\n\n内容：\n' + scrapedText;
+  }
+
+  // 给每条评论的操作栏注入「水它」按钮
+  function injectWaterButtons() {
+    getPosts().forEach(post => {
+      const ops = post.querySelector('.post-ops');
+      if (!ops) return;
+      if (ops.querySelector('.lsb-water-btn')) return; // 已注入
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'lsb-water-btn';
+      btn.textContent = '水它';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setTarget(post);
+      });
+      ops.appendChild(btn);
+    });
+  }
+
+  // 选中某条评论作为目标，高亮并更新面板状态
+  function setTarget(post) {
+    document.querySelectorAll('li.lsb-target-highlight').forEach(el => el.classList.remove('lsb-target-highlight'));
+    currentTarget = {
+      post: post,
+      floor: post.getAttribute('data-floor') || '',
+      username: getAuthorInfo(post).name
+    };
+    post.classList.add('lsb-target-highlight');
+    updateTargetInfo();
+  }
+
+  // 更新面板里的目标状态显示
+  function updateTargetInfo() {
+    const el = document.getElementById('lsb-ai-target-info');
+    if (!el) return;
+    if (!currentTarget) {
+      el.textContent = '尚未选择目标评论，点任意评论旁的「水它」按钮';
+      el.classList.add('lsb-empty');
+      return;
+    }
+    el.classList.remove('lsb-empty');
+    const floor = currentTarget.floor ? ('#' + currentTarget.floor + ' ') : '';
+    el.textContent = '目标评论：' + floor + '@' + currentTarget.username;
+  }
+
+  /* ============================================================
+   * 7. AI 调用模块
    * ============================================================ */
 
   function buildUserContent(scrapedText) {
@@ -723,8 +921,11 @@
         <button type="button" class="lsb-ai-close" title="关闭">×</button>
       </div>
       <div class="lsb-ai-body">
+        <div class="lsb-target-info lsb-empty" id="lsb-ai-target-info">尚未选择目标评论，点任意评论旁的「水它」按钮</div>
+        <button type="button" class="lsb-ai-btn lsb-ai-btn-primary" id="lsb-ai-generate-reply">抓取并生成回应（针对评论）</button>
+
         <div class="lsb-ai-row">
-          <label class="lsb-ai-label">抓取范围</label>
+          <label class="lsb-ai-label">抓取范围（整帖总结式）</label>
           <select class="lsb-ai-select" id="lsb-ai-scope">
             <option value="first">仅首楼（楼主第一条）</option>
             <option value="owner" selected>楼主全部发言</option>
@@ -815,6 +1016,7 @@
     panel.querySelector('.lsb-ai-close').addEventListener('click', () => hidePanel());
 
     generateBtn.addEventListener('click', onGenerate);
+    document.getElementById('lsb-ai-generate-reply').addEventListener('click', onGenerateReply);
     document.getElementById('lsb-ai-fill').addEventListener('click', onFill);
 
     document.getElementById('lsb-ai-save').addEventListener('click', () => {
@@ -930,8 +1132,12 @@
    * 9. 主流程（生成 / 填入）
    * ============================================================ */
 
+  // 回应模式下待填入的 @前缀（如 "@CloseAI #1 "），总结式回复为空字符串
+  let replyPrefix = '';
+
   async function onGenerate() {
     if (generateBtn && generateBtn.disabled) return; // 禁止重复点击
+    replyPrefix = ''; // 总结式回复，不带 @前缀
     const cfg = readConfigFromUI();
     saveConfig(cfg);
 
@@ -973,13 +1179,61 @@
     }
   }
 
+  // 针对选中的目标评论生成回应
+  async function onGenerateReply() {
+    if (!currentTarget) {
+      setStatus('请先点某条评论旁的「水它」按钮选中目标评论', 'error');
+      return;
+    }
+    const cfg = readConfigFromUI();
+    saveConfig(cfg);
+    const err = validateConfig(cfg);
+    if (err) {
+      setStatus(err, 'error');
+      document.getElementById('lsb-ai-settings').open = true;
+      return;
+    }
+
+    let scraped;
+    try {
+      scraped = scrapeReplyTarget(currentTarget, cfg.includeSpeaker, cfg.maxContextChars, cfg.enableImage);
+    } catch (e) {
+      setStatus(e.message, 'error');
+      return;
+    }
+
+    if (scraped.truncated) {
+      setStatus('提示：内容超过 ' + cfg.maxContextChars + ' 字符，已截断后生成。', 'info');
+    }
+
+    setGenerating(true);
+    previewEl.classList.remove('lsb-success');
+
+    try {
+      const userContent = buildReplyUserContent(scraped.text, scraped.hasMention);
+      const reply = await requestAI(cfg, userContent, []);
+      previewEl.value = reply;
+      previewEl.classList.add('lsb-success');
+      // 有 @ 关系才带前缀，无 @ 不带
+      replyPrefix = scraped.hasMention
+        ? ('@' + currentTarget.username + (currentTarget.floor ? (' #' + currentTarget.floor) : '') + ' ')
+        : '';
+      const note = scraped.hasMention ? '（已追溯对话链，填入时会自动带 @前缀）' : '（该评论无 @，按帖子+评论生成，不带前缀）';
+      setStatus('回应生成成功' + note + '，可修改后点「填入编辑器」', 'ok');
+    } catch (e) {
+      setStatus(e.message || '生成失败', 'error');
+    } finally {
+      setGenerating(false);
+    }
+  }
+
   function onFill() {
     const text = previewEl.value.trim();
     if (!text) {
       setStatus('预览区为空，请先生成回复或手动输入内容', 'error');
       return;
     }
-    fillEditor(text);
+    fillEditor(replyPrefix + text);
   }
 
   /* ============================================================
@@ -996,6 +1250,11 @@
     if (document.getElementById(FAB_ID)) return;
     try {
       buildPanel();
+      injectWaterButtons();
+      // 评论可能是分页/懒加载，新评论出现时补注入「水它」按钮
+      const mo = new MutationObserver(() => injectWaterButtons());
+      const list = document.querySelector('.topic-post-list');
+      mo.observe(list || document.body, { childList: true, subtree: true });
     } catch (e) {
       console.error('[水贴专用] 初始化失败：', e && e.message ? e.message : e);
     }
