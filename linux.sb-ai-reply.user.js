@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.4.4
+// @version      2.4.5
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -177,6 +177,11 @@
       outline: none;
       border-color: #3b82f6;
       box-shadow: 0 0 0 3px rgba(59, 130, 246, .15);
+    }
+    .lsb-ai-select:disabled {
+      background: #f3f4f6;
+      color: #9ca3af;
+      cursor: not-allowed;
     }
     .lsb-ai-textarea { resize: vertical; min-height: 60px; }
 
@@ -603,6 +608,7 @@
 
   // 当前选中的目标评论 { post, floor, username }
   let currentTarget = null;
+  let prevScope = 'owner'; // 取消目标评论后要恢复的抓取范围
 
   // 解析评论正文里的「@用户名 #楼层」提及。
   // 烧饼社区的"引用回复"会在正文生成 @用户名 #楼层 前缀，这就是回复关系标记。
@@ -749,6 +755,13 @@
     post.classList.add('lsb-target-highlight');
     updateTargetInfo();
     updateGenerateBtnText();
+    // 选中目标后，抓取范围下拉切到「回复评论中」并禁用，避免误导
+    const scope = document.getElementById('lsb-ai-scope');
+    if (scope) {
+      if (!scope.disabled && scope.value !== 'reply') prevScope = scope.value; // 记录原范围
+      scope.value = 'reply';
+      scope.disabled = true;
+    }
     showPanel(); // 自动展开面板，方便直接点生成
   }
 
@@ -758,6 +771,12 @@
     document.querySelectorAll('li.lsb-target-highlight').forEach(el => el.classList.remove('lsb-target-highlight'));
     updateTargetInfo();
     updateGenerateBtnText();
+    // 恢复抓取范围下拉框
+    const scope = document.getElementById('lsb-ai-scope');
+    if (scope) {
+      scope.disabled = false;
+      if (scope.value === 'reply') scope.value = prevScope || 'owner';
+    }
   }
 
   // 更新面板里的目标状态显示
@@ -994,6 +1013,7 @@
             <option value="first">仅首楼（楼主第一条）</option>
             <option value="owner" selected>楼主全部发言</option>
             <option value="all">全帖内容（所有用户）</option>
+            <option value="reply">回复评论中…</option>
           </select>
         </div>
 
