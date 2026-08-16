@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.4.8
+// @version      2.4.9
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -1339,10 +1339,9 @@
       const reply = await requestAI(replyCfg, userContent, []);
       previewEl.value = reply;
       previewEl.classList.add('lsb-success');
-      replyPrefix = scraped.hasMention
-        ? ('@' + currentTarget.username + (currentTarget.floor ? (' #' + currentTarget.floor) : '') + ' ')
-        : '';
-      const note = scraped.hasMention ? '（已追溯对话链，填入时会自动带 @前缀）' : '（该评论无 @，按帖子+评论生成，不带前缀）';
+      // 回复目标评论，总是带 @目标评论作者 #楼层 前缀（和论坛「引用回复」按钮一致）
+      replyPrefix = '@' + currentTarget.username + (currentTarget.floor ? (' #' + currentTarget.floor) : '') + ' ';
+      const note = scraped.hasMention ? '（已追溯对话链，填入时会自动带 @前缀）' : '（该评论无 @，按帖子+评论生成，仍会带 @前缀）';
       setStatus('回应生成成功' + note + '，可修改后点「填入编辑器」', 'ok');
     } catch (e) {
       setStatus(e.message || '生成失败', 'error');
