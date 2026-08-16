@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.5.0
+// @version      2.5.1
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -977,7 +977,9 @@
               } else {
                 text = parseResponses(JSON.parse(raw));
               }
-              resolve(text.trim());
+              // 检测响应里是否有联网搜索痕迹（web_search 工具调用或搜索结果）
+              const searched = /web_search/i.test(raw);
+              resolve({ text: text.trim(), searched });
             } catch (e) {
               reject(new Error(e.message || '响应解析失败'));
             }
@@ -1362,11 +1364,12 @@
 
     try {
       const userContent = buildUserContent(scraped.text);
-      const reply = await requestAI(cfg, userContent, scraped.images);
-      previewEl.value = reply;
+      const result = await requestAI(cfg, userContent, scraped.images);
+      previewEl.value = result.text;
       previewEl.classList.add('lsb-success');
       const imgNote = (scraped.images && scraped.images.length) ? ('（已附带 ' + scraped.images.length + ' 张图片）') : '';
-      setStatus('生成成功' + imgNote + '，可手动修改后点击「填入编辑器」', 'ok');
+      const searchNote = (cfg.enableSearch && !result.searched) ? '（⚠ 未检测到联网搜索，结果可能基于模型知识）' : '';
+      setStatus('生成成功' + imgNote + searchNote + '，可手动修改后点击「填入编辑器」', 'ok');
     } catch (e) {
       setStatus(e.message || '生成失败', 'error');
     } finally {
@@ -1408,13 +1411,14 @@
       });
       // 针对评论的回应，使用「水评论」提示词
       const replyCfg = Object.assign({}, cfg, { systemPrompt: cfg.replySystemPrompt || cfg.systemPrompt });
-      const reply = await requestAI(replyCfg, userContent, []);
-      previewEl.value = reply;
+      const result = await requestAI(replyCfg, userContent, []);
+      previewEl.value = result.text;
       previewEl.classList.add('lsb-success');
       // 回复目标评论，总是带 @目标评论作者 #楼层 前缀（和论坛「引用回复」按钮一致）
       replyPrefix = '@' + currentTarget.username + (currentTarget.floor ? (' #' + currentTarget.floor) : '') + ' ';
       const note = scraped.hasMention ? '（已追溯对话链，填入时会自动带 @前缀）' : '（该评论无 @，按帖子+评论生成，仍会带 @前缀）';
-      setStatus('回应生成成功' + note + '，可修改后点「填入编辑器」', 'ok');
+      const searchNote = (cfg.enableSearch && !result.searched) ? '（⚠ 未检测到联网搜索，结果可能基于模型知识）' : '';
+      setStatus('回应生成成功' + note + searchNote + '，可修改后点「填入编辑器」', 'ok');
     } catch (e) {
       setStatus(e.message || '生成失败', 'error');
     } finally {
