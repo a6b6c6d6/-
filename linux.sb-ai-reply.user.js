@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.4.6
+// @version      2.4.7
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -182,6 +182,14 @@
       background: #f3f4f6;
       color: #9ca3af;
       cursor: not-allowed;
+    }
+    .lsb-scope-reply-tip {
+      padding: 7px 9px;
+      font-size: 13px;
+      color: #1e40af;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
     }
     .lsb-ai-textarea { resize: vertical; min-height: 60px; }
 
@@ -608,7 +616,6 @@
 
   // 当前选中的目标评论 { post, floor, username }
   let currentTarget = null;
-  let prevScope = 'owner'; // 取消目标评论后要恢复的抓取范围
 
   // 解析评论正文里的「@用户名 #楼层」提及。
   // 烧饼社区的"引用回复"会在正文生成 @用户名 #楼层 前缀，这就是回复关系标记。
@@ -759,13 +766,11 @@
     post.classList.add('lsb-target-highlight');
     updateTargetInfo();
     updateGenerateBtnText();
-    // 选中目标后，抓取范围下拉切到「回复评论中」并禁用，避免误导
-    const scope = document.getElementById('lsb-ai-scope');
-    if (scope) {
-      if (!scope.disabled && scope.value !== 'reply') prevScope = scope.value; // 记录原范围
-      scope.value = 'reply';
-      scope.disabled = true;
-    }
+    // 选中目标后，隐藏抓取范围，显示「回复评论中」提示，避免误导
+    const scopeRow = document.getElementById('lsb-ai-scope-row');
+    const scopeTip = document.getElementById('lsb-ai-scope-tip');
+    if (scopeRow) scopeRow.style.display = 'none';
+    if (scopeTip) scopeTip.style.display = '';
     showPanel(); // 自动展开面板，方便直接点生成
   }
 
@@ -776,11 +781,10 @@
     updateTargetInfo();
     updateGenerateBtnText();
     // 恢复抓取范围下拉框
-    const scope = document.getElementById('lsb-ai-scope');
-    if (scope) {
-      scope.disabled = false;
-      if (scope.value === 'reply') scope.value = prevScope || 'owner';
-    }
+    const scopeRow = document.getElementById('lsb-ai-scope-row');
+    const scopeTip = document.getElementById('lsb-ai-scope-tip');
+    if (scopeRow) scopeRow.style.display = '';
+    if (scopeTip) scopeTip.style.display = 'none';
   }
 
   // 更新面板里的目标状态显示
@@ -1011,14 +1015,17 @@
         </div>
         <button type="button" class="lsb-ai-btn lsb-ai-btn-primary" id="lsb-ai-generate">抓取并生成回复</button>
 
-        <div class="lsb-ai-row">
+        <div class="lsb-ai-row" id="lsb-ai-scope-row">
           <label class="lsb-ai-label">抓取范围（未选目标评论时生效）</label>
           <select class="lsb-ai-select" id="lsb-ai-scope">
             <option value="first">仅首楼（楼主第一条）</option>
             <option value="owner" selected>楼主全部发言</option>
             <option value="all">全帖内容（所有用户）</option>
-            <option value="reply">回复评论中…</option>
           </select>
+        </div>
+        <div class="lsb-ai-row" id="lsb-ai-scope-tip" style="display:none">
+          <label class="lsb-ai-label">回复评论中</label>
+          <div class="lsb-scope-reply-tip">已选中目标评论，将针对该评论生成回应</div>
         </div>
 
         <div class="lsb-ai-status lsb-info" id="lsb-ai-status">选目标评论则针对回复，未选则总结全帖；点「抓取并生成回复」</div>
