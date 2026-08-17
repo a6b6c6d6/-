@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.6.0
+// @version      2.6.1
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -999,77 +999,92 @@
     return sendRequest(req);
   }
 
-  // 从 AI 输出里解析关键词 JSON 数组（三层兜底：直接parse → 抠出[]/{}/keywords → 按分隔符拆）
-  function parseKeywordsJson(text) {
+  // 解析阶段1 输出的 {kw, fallback} 关键词对（三层兜底，兼容纯字符串数组）
+  function parsePairs(text) {
     const t = String(text || '').trim();
-    const tryParse = (s) => {
-      try {
-        const v = JSON.parse(s);
-        if (Array.isArray(v)) return v.map(String).filter(x => x && x.trim());
-        return null;
-      } catch (e) { return null; }
+    const normalize = (v) => {
+      if (!Array.isArray(v)) return null;
+      const pairs = [];
+      for (const x of v) {
+        if (x && typeof x === 'object') {
+          const kw = String(x.kw || x.q || '').trim();
+          const fb = String(x.fallback || x.g || kw).trim();
+          if (kw) pairs.push({ kw: kw, fallback: fb || kw });
+        } else if (typeof x === 'string' && x.trim()) {
+          pairs.push({ kw: x.trim(), fallback: x.trim() });
+        }
+      }
+      return pairs.length ? pairs : null;
     };
-    let r = tryParse(t);
-    if (r) return r;
-    const arr = t.match(/\[[\s\S]*\]/);
-    if (arr) { r = tryParse(arr[0]); if (r) return r; }
-    const obj = t.match(/\{[\s\S]*\}/);
-    if (obj) {
-      try {
-        const o = JSON.parse(obj[0]);
-        if (Array.isArray(o)) return o.map(String).filter(x => x && x.trim());
-        if (o && Array.isArray(o.keywords)) return o.keywords.map(String).filter(x => x && x.trim());
-      } catch (e) { /* 继续降级 */ }
+    let r = null;
+    try { r = normalize(JSON.parse(t)); } catch (e) { /* 继续 */ }
+    if (!r) {
+      const arr = t.match(/\[[\s\S]*\]/);
+      if (arr) { try { r = normalize(JSON.parse(arr[0])); } catch (e) { /* 继续 */ } }
     }
-    return t.split(/[\n,，、;；]+/).map(x => x.trim())
-      .filter(x => x && x.length >= 2 && !/^[{}\[\]"']/.test(x))
-      .filter(x => !/^(无需|不需要|不用|没必要|无需搜索|无需联网|不需要搜索)/.test(x));
+    if (!r) {
+      const obj = t.match(/\{[\s\S]*\}/);
+      if (obj) {
+        try {
+          const o = JSON.parse(obj[0]);
+          if (o && Array.isArray(o.keywords)) r = normalize(o.keywords);
+        } catch (e) { /* 继续 */ }
+      }
+    }
+    return r || [];
   }
 
   // 四阶段联网搜索编排：规划 → JSON解析 → 分批并行搜 → 汇总
   async function agentSearchReply(cfg, rawText, finalUserContent, images, onProgress) {
     const progress = onProgress || function () {};
 
-    // 阶段1：规划关键词（不带搜索工具，输出 JSON 数组）
+    // 阶段1：规划关键词（不带搜索工具，输出 {kw, fallback} 关键词对）
     progress('正在分析帖子、提炼搜索关键词…');
     const planReq = buildRequest(cfg, {
       system: '你是一个搜索规划助手。你的任务是分析论坛内容，提炼用于联网搜索的关键词。',
-      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 字符串数组，每个元素是一个精准、独立的搜索关键词（不要重叠、不要语气词、不要解释）。若内容属于通用知识话题、无需联网搜索，输出空数组 []。若内容里包含外部链接，请把链接指向的项目名/产品名/页面主题也提炼为搜索关键词。\n\n论坛内容：\n' + rawText,
+      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 数组，每个元素是一个对象，包含两个字段：「kw」是精准搜索词，「fallback」是更泛化的搜索词（用品牌、品类、价格等通用表述，去掉可能不准确或罕见的专有名词）。若内容属于通用知识话题、无需联网搜索，输出空数组 []。若内容里包含外部链接，请把链接指向的项目名/产品名/页面主题也纳入搜索词。\n\n论坛内容：\n' + rawText,
       images: undefined,
       tools: undefined
     });
     const planRes = await sendRequest(planReq);
-    const keywords = parseKeywordsJson(planRes.text);
+    const pairs = parsePairs(planRes.text);
 
-    if (!keywords.length) {
+    if (!pairs.length) {
       // 无需搜索 → 降级普通生成（不带搜索工具）
       progress('无需联网搜索，直接生成…');
       const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalUserContent, images: images, tools: undefined });
       return sendRequest(req);
     }
 
-    // 阶段3：分批并行搜索（每批最多 3 个，单个失败不影响整体）
+    // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，结果合并）
     const BATCH = 3;
-    const totalBatches = Math.ceil(keywords.length / BATCH);
+    const searchItems = [];
+    for (const p of pairs) {
+      searchItems.push({ label: p.kw, query: p.kw });
+      if (p.fallback && p.fallback !== p.kw) {
+        searchItems.push({ label: p.kw + '（泛化）', query: p.fallback });
+      }
+    }
+    const totalBatches = Math.ceil(searchItems.length / BATCH);
     const searchTexts = [];
-    for (let i = 0; i < keywords.length; i += BATCH) {
-      const batch = keywords.slice(i, i + BATCH);
-      progress('并行搜索 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批（' + batch.length + ' 个关键词）…');
-      const reqs = batch.map(kw => buildRequest(cfg, {
+    for (let i = 0; i < searchItems.length; i += BATCH) {
+      const batch = searchItems.slice(i, i + BATCH);
+      progress('并行搜索 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批（' + batch.length + ' 次）…');
+      const reqs = batch.map(item => buildRequest(cfg, {
         system: '你是一个联网搜索助手。请对用户给出的关键词执行联网搜索，并把搜索结果的内容整理出来。',
-        userContent: kw,
+        userContent: item.query,
         images: undefined,
         tools: searchTools(cfg)
       }));
       const ress = await Promise.all(reqs.map(r => sendRequest(r).catch(e => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
       ress.forEach((r, idx) => {
-        searchTexts.push('【关键词：' + batch[idx] + '】\n' + r.text);
+        searchTexts.push('【关键词：' + batch[idx].label + '】\n' + r.text);
       });
     }
 
-    // 阶段4：汇总生成（不带搜索工具）
+    // 阶段4：汇总生成（不带搜索工具，附上下文约束纠错指导）
     progress('搜索完成，正在汇总生成回帖…');
-    const finalContent = finalUserContent + '\n\n=== 联网搜索到的相关信息（仅供参考，可能不准确或过时）===\n\n' + searchTexts.join('\n\n');
+    const finalContent = finalUserContent + '\n\n【注意】若下面的搜索结果中出现了与帖子原文名称不一致的正确写法（如产品名、会员名、品牌名等），请结合帖子整体上下文判断作者真正想表达的，并在回帖中使用正确写法，不要照搬帖子里的明显拼写错误。\n\n=== 联网搜索到的相关信息（仅供参考，可能不准确或过时）===\n\n' + searchTexts.join('\n\n');
     const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalContent, images: images, tools: undefined });
     const r = await sendRequest(req);
     return { text: r.text, searched: true };
