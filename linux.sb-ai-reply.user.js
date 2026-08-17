@@ -253,8 +253,21 @@
 
     /* 模型名称 + 拉取按钮 */
     .lsb-ai-model-row { display: flex; gap: 6px; align-items: stretch; }
-    .lsb-ai-model-row .lsb-ai-input { flex: 1; }
-    .lsb-ai-model-row button { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
+    .lsb-ai-model-input-wrap { position: relative; flex: 1; display: flex; }
+    .lsb-ai-model-input-wrap .lsb-ai-input { flex: 1; padding-right: 28px; } /* 给右侧箭头留位 */
+    .lsb-ai-model-caret {
+      position: absolute;
+      right: 1px; top: 1px; bottom: 1px;
+      width: 26px;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      color: #9ca3af;
+      font-size: 11px;
+      border-radius: 0 8px 8px 0;
+    }
+    .lsb-ai-model-caret:hover { color: #2563eb; background: #f3f4f6; }
+    #lsb-ai-model-fetch { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
 
     /* 中转站预设：自定义下拉组件 */
     .lsb-ai-profile-dd { position: relative; }
@@ -1542,7 +1555,10 @@
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">模型名称（Model）</label>
               <div class="lsb-ai-model-row">
-                <input class="lsb-ai-input" id="lsb-ai-cfg-model" type="text" list="lsb-ai-model-list" placeholder="gpt-4.1-mini" autocomplete="off">
+                <div class="lsb-ai-model-input-wrap">
+                  <input class="lsb-ai-input" id="lsb-ai-cfg-model" type="text" list="lsb-ai-model-list" placeholder="gpt-4.1-mini" autocomplete="off">
+                  <button type="button" class="lsb-ai-model-caret" id="lsb-ai-model-caret" tabindex="-1" title="展开模型列表">▾</button>
+                </div>
                 <datalist id="lsb-ai-model-list"></datalist>
                 <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-model-fetch" title="从当前 Base URL / Key 拉取可用模型列表">拉取</button>
               </div>
@@ -1649,6 +1665,16 @@
     // 模型列表：拉取按钮 + 载入时用激活预设缓存回填 datalist
     document.getElementById('lsb-ai-model-fetch').addEventListener('click', fetchModels);
     populateModelListFromActiveProfile();
+
+    // 模型框右侧下箭头：点一下展开 datalist 建议（原生 datalist 无可见箭头，手动补一个）
+    const modelInput = document.getElementById('lsb-ai-cfg-model');
+    document.getElementById('lsb-ai-model-caret').addEventListener('click', () => {
+      modelInput.focus();
+      try {
+        modelInput.select(); // 选中现有值，方便直接打字覆盖筛选
+        if (typeof modelInput.showPicker === 'function') modelInput.showPicker(); // Chrome 121+ 支持 datalist
+      } catch (e) { /* 不支持/被拦截则仅聚焦，靠输入触发建议 */ }
+    });
 
     document.getElementById('lsb-ai-save').addEventListener('click', () => {
       saveConfig(readConfigFromUI());
