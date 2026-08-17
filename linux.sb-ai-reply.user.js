@@ -532,6 +532,18 @@
         out.push(alt ? '[' + alt + ']' : '[图片]');
         return;
       }
+      if (tag === 'a') {
+        // 保留外部链接的 URL（AI 需要知道链接指向哪）；站内链接/@提及/锚点只留文字
+        const href = (n.getAttribute('href') || '').trim();
+        const text = (n.textContent || '').trim();
+        const isExternal = /^https?:\/\//i.test(href) && href.indexOf(location.hostname) === -1;
+        if (isExternal) {
+          out.push(text ? (text + ' (' + href + ')') : href);
+        } else if (text) {
+          out.push(text);
+        }
+        return;
+      }
       if (/^h[1-6]$/.test(tag)) {
         out.push('\n**' + n.textContent.trim() + '**\n');
         return;
@@ -1022,7 +1034,7 @@
     progress('正在分析帖子、提炼搜索关键词…');
     const planReq = buildRequest(cfg, {
       system: '你是一个搜索规划助手。你的任务是分析论坛内容，提炼用于联网搜索的关键词。',
-      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 字符串数组，每个元素是一个精准、独立的搜索关键词（不要重叠、不要语气词、不要解释）。若内容属于通用知识话题、无需联网搜索，输出空数组 []。\n\n论坛内容：\n' + rawText,
+      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 字符串数组，每个元素是一个精准、独立的搜索关键词（不要重叠、不要语气词、不要解释）。若内容属于通用知识话题、无需联网搜索，输出空数组 []。若内容里包含外部链接（如 GitHub 项目、文档站点等），请把链接指向的项目名/产品名/页面主题也提炼为搜索关键词。\n\n论坛内容：\n' + rawText,
       images: undefined,
       tools: undefined
     });
