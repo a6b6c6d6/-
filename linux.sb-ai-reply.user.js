@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.5.2
+// @version      2.6.0
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -890,99 +890,74 @@
   // 联网搜索使用指导（开关打开时附加到系统提示词末尾，引导 AI 自主判断该不该搜、搜什么）
   const SEARCH_GUIDANCE = '\n\n【联网搜索使用说明】你拥有联网搜索工具。请仅在确实需要实时信息或外部知识时才使用它（例如帖子涉及最近发生的事件、最新版本、实时数据、当前热点等）。使用前请先提炼帖子核心主题作为搜索关键词，不要把整段帖子内容当作搜索词。对于通用知识类话题（Linux、编程、教程、生活经验等）通常无需联网。';
 
-  function requestAI(cfg, userContent, images) {
+  // 生成联网搜索工具（按格式返回对应写法）
+  function searchTools(cfg) {
+    if (cfg.apiFormat === 'anthropic') {
+      return [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }];
+    }
+    return [{ type: 'web_search' }];
+  }
+
+  // 构造三格式请求（url/headers/body），opts: { system, userContent, images, tools }
+  function buildRequest(cfg, opts) {
+    const isAnthropic = cfg.apiFormat === 'anthropic';
+    const isChat = cfg.apiFormat === 'chat';
+    const useImages = !!cfg.enableImage && Array.isArray(opts.images) && opts.images.length > 0;
+    const system = opts.system != null ? opts.system : cfg.systemPrompt;
+    let url, headers, body;
+
+    if (isAnthropic) {
+      url = joinUrl(cfg.baseUrl, 'messages');
+      headers = { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' };
+      const content = useImages
+        ? [{ type: 'text', text: opts.userContent }].concat(opts.images.map(u => ({ type: 'image', source: { type: 'url', url: u } })))
+        : opts.userContent;
+      body = { model: cfg.model, max_tokens: cfg.maxTokens, system: system, messages: [{ role: 'user', content: content }], temperature: cfg.temperature };
+      if (opts.tools) body.tools = opts.tools;
+    } else if (isChat) {
+      url = joinUrl(cfg.baseUrl, 'chat/completions');
+      headers = { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' };
+      const content = useImages
+        ? [{ type: 'text', text: opts.userContent }].concat(opts.images.map(u => ({ type: 'image_url', image_url: { url: u } })))
+        : opts.userContent;
+      body = { model: cfg.model, messages: [{ role: 'system', content: system }, { role: 'user', content: content }], temperature: cfg.temperature, max_tokens: cfg.maxTokens };
+      if (opts.tools) body.tools = opts.tools;
+    } else {
+      url = joinUrl(cfg.baseUrl, 'responses');
+      headers = { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' };
+      const content = useImages
+        ? [{ type: 'input_text', text: opts.userContent }].concat(opts.images.map(u => ({ type: 'input_image', image_url: u })))
+        : opts.userContent;
+      body = { model: cfg.model, instructions: system, input: [{ role: 'user', content: content }], temperature: cfg.temperature, max_output_tokens: cfg.maxTokens };
+      if (opts.tools) body.tools = opts.tools;
+    }
+    return { url, headers, body, isAnthropic, isChat };
+  }
+
+  // 发送请求并解析，返回 { text, searched }
+  function sendRequest(req) {
     return new Promise((resolve, reject) => {
-      const isAnthropic = cfg.apiFormat === 'anthropic';
-      const isChat = cfg.apiFormat === 'chat';
-      const useImages = !!cfg.enableImage && Array.isArray(images) && images.length > 0;
-      const useSearch = !!cfg.enableSearch;
-      // 联网时附加搜索使用指导，让 AI 自主判断是否搜索、提炼关键词
-      const sysPrompt = useSearch ? (cfg.systemPrompt + SEARCH_GUIDANCE) : cfg.systemPrompt;
-
-      let url, headers, body;
-
-      if (isAnthropic) {
-        // Anthropic Messages API（/v1/messages）
-        url = joinUrl(cfg.baseUrl, 'messages');
-        headers = {
-          'x-api-key': cfg.apiKey,
-          'anthropic-version': '2023-06-01',
-          'Content-Type': 'application/json'
-        };
-        const content = useImages
-          ? [{ type: 'text', text: userContent }].concat(images.map(u => ({ type: 'image', source: { type: 'url', url: u } })))
-          : userContent;
-        body = {
-          model: cfg.model,
-          max_tokens: cfg.maxTokens,
-          system: sysPrompt,
-          messages: [{ role: 'user', content: content }],
-          temperature: cfg.temperature
-        };
-        if (useSearch) {
-          body.tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }];
-        }
-      } else if (isChat) {
-        // Chat Completions（/v1/chat/completions）
-        url = joinUrl(cfg.baseUrl, 'chat/completions');
-        headers = { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' };
-        const content = useImages
-          ? [{ type: 'text', text: userContent }].concat(images.map(u => ({ type: 'image_url', image_url: { url: u } })))
-          : userContent;
-        body = {
-          model: cfg.model,
-          messages: [
-            { role: 'system', content: sysPrompt },
-            { role: 'user', content: content }
-          ],
-          temperature: cfg.temperature,
-          max_tokens: cfg.maxTokens
-        };
-        if (useSearch) {
-          body.tools = [{ type: 'web_search' }];
-        }
-      } else {
-        // Responses API（/v1/responses）
-        url = joinUrl(cfg.baseUrl, 'responses');
-        headers = { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' };
-        const content = useImages
-          ? [{ type: 'input_text', text: userContent }].concat(images.map(u => ({ type: 'input_image', image_url: u })))
-          : userContent;
-        body = {
-          model: cfg.model,
-          instructions: sysPrompt,
-          input: [{ role: 'user', content: content }],
-          temperature: cfg.temperature,
-          max_output_tokens: cfg.maxTokens
-        };
-        if (useSearch) {
-          body.tools = [{ type: 'web_search' }];
-        }
-      }
-
       GM_xmlhttpRequest({
         method: 'POST',
-        url: url,
+        url: req.url,
         timeout: 180000, // 180 秒
-        headers: headers,
-        data: JSON.stringify(body),
+        headers: req.headers,
+        data: JSON.stringify(req.body),
         onload: (resp) => {
           const status = resp.status;
           const raw = resp.responseText || '';
           if (status >= 200 && status < 300) {
             try {
               let text;
-              if (isAnthropic) {
-                // Anthropic 兼容 SSE 流式和普通 JSON 两种响应
+              if (req.isAnthropic) {
                 text = raw.trimStart().startsWith('{')
                   ? parseAnthropicJson(JSON.parse(raw))
                   : parseAnthropicSse(raw);
-              } else if (isChat) {
+              } else if (req.isChat) {
                 text = parseChat(JSON.parse(raw));
               } else {
                 text = parseResponses(JSON.parse(raw));
               }
-              // 检测响应里是否有联网搜索痕迹（web_search 工具调用或搜索结果）
               const searched = /web_search/i.test(raw);
               resolve({ text: text.trim(), searched });
             } catch (e) {
@@ -997,6 +972,95 @@
         onabort: () => reject(new Error('请求已取消'))
       });
     });
+  }
+
+  // 单次调用（联网开关打开时注入搜索工具 + 使用指导）
+  function requestAI(cfg, userContent, images) {
+    const useSearch = !!cfg.enableSearch;
+    const sysPrompt = useSearch ? (cfg.systemPrompt + SEARCH_GUIDANCE) : cfg.systemPrompt;
+    const req = buildRequest(cfg, {
+      system: sysPrompt,
+      userContent: userContent,
+      images: images,
+      tools: useSearch ? searchTools(cfg) : undefined
+    });
+    return sendRequest(req);
+  }
+
+  // 从 AI 输出里解析关键词 JSON 数组（三层兜底：直接parse → 抠出[]/{}/keywords → 按分隔符拆）
+  function parseKeywordsJson(text) {
+    const t = String(text || '').trim();
+    const tryParse = (s) => {
+      try {
+        const v = JSON.parse(s);
+        if (Array.isArray(v)) return v.map(String).filter(x => x && x.trim());
+        return null;
+      } catch (e) { return null; }
+    };
+    let r = tryParse(t);
+    if (r) return r;
+    const arr = t.match(/\[[\s\S]*\]/);
+    if (arr) { r = tryParse(arr[0]); if (r) return r; }
+    const obj = t.match(/\{[\s\S]*\}/);
+    if (obj) {
+      try {
+        const o = JSON.parse(obj[0]);
+        if (Array.isArray(o)) return o.map(String).filter(x => x && x.trim());
+        if (o && Array.isArray(o.keywords)) return o.keywords.map(String).filter(x => x && x.trim());
+      } catch (e) { /* 继续降级 */ }
+    }
+    return t.split(/[\n,，、;；]+/).map(x => x.trim())
+      .filter(x => x && x.length >= 2 && !/^[{}\[\]"']/.test(x))
+      .filter(x => !/^(无需|不需要|不用|没必要|无需搜索|无需联网|不需要搜索)/.test(x));
+  }
+
+  // 四阶段联网搜索编排：规划 → JSON解析 → 分批并行搜 → 汇总
+  async function agentSearchReply(cfg, rawText, finalUserContent, images, onProgress) {
+    const progress = onProgress || function () {};
+
+    // 阶段1：规划关键词（不带搜索工具，输出 JSON 数组）
+    progress('正在分析帖子、提炼搜索关键词…');
+    const planReq = buildRequest(cfg, {
+      system: '你是一个搜索规划助手。你的任务是分析论坛内容，提炼用于联网搜索的关键词。',
+      userContent: '请分析下面的论坛内容，判断需要搜索哪些实时/外部信息来辅助回复。直接输出一个 JSON 字符串数组，每个元素是一个精准、独立的搜索关键词（不要重叠、不要语气词、不要解释）。若内容属于通用知识话题、无需联网搜索，输出空数组 []。\n\n论坛内容：\n' + rawText,
+      images: undefined,
+      tools: undefined
+    });
+    const planRes = await sendRequest(planReq);
+    const keywords = parseKeywordsJson(planRes.text);
+
+    if (!keywords.length) {
+      // 无需搜索 → 降级普通生成（不带搜索工具）
+      progress('无需联网搜索，直接生成…');
+      const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalUserContent, images: images, tools: undefined });
+      return sendRequest(req);
+    }
+
+    // 阶段3：分批并行搜索（每批最多 3 个，单个失败不影响整体）
+    const BATCH = 3;
+    const totalBatches = Math.ceil(keywords.length / BATCH);
+    const searchTexts = [];
+    for (let i = 0; i < keywords.length; i += BATCH) {
+      const batch = keywords.slice(i, i + BATCH);
+      progress('并行搜索 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批（' + batch.length + ' 个关键词）…');
+      const reqs = batch.map(kw => buildRequest(cfg, {
+        system: '你是一个联网搜索助手。请对用户给出的关键词执行联网搜索，并把搜索结果的内容整理出来。',
+        userContent: kw,
+        images: undefined,
+        tools: searchTools(cfg)
+      }));
+      const ress = await Promise.all(reqs.map(r => sendRequest(r).catch(e => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
+      ress.forEach((r, idx) => {
+        searchTexts.push('【关键词：' + batch[idx] + '】\n' + r.text);
+      });
+    }
+
+    // 阶段4：汇总生成（不带搜索工具）
+    progress('搜索完成，正在汇总生成回帖…');
+    const finalContent = finalUserContent + '\n\n=== 联网搜索到的相关信息（仅供参考，可能不准确或过时）===\n\n' + searchTexts.join('\n\n');
+    const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalContent, images: images, tools: undefined });
+    const r = await sendRequest(req);
+    return { text: r.text, searched: true };
   }
 
   /* ============================================================
@@ -1369,7 +1433,9 @@
 
     try {
       const userContent = buildUserContent(scraped.text);
-      const result = await requestAI(cfg, userContent, scraped.images);
+      const result = cfg.enableSearch
+        ? await agentSearchReply(cfg, scraped.text, userContent, scraped.images, (m) => setStatus(m, 'loading'))
+        : await requestAI(cfg, userContent, scraped.images);
       previewEl.value = result.text;
       previewEl.classList.add('lsb-success');
       const imgNote = (scraped.images && scraped.images.length) ? ('（已附带 ' + scraped.images.length + ' 张图片）') : '';
@@ -1416,7 +1482,9 @@
       });
       // 针对评论的回应，使用「水评论」提示词
       const replyCfg = Object.assign({}, cfg, { systemPrompt: cfg.replySystemPrompt || cfg.systemPrompt });
-      const result = await requestAI(replyCfg, userContent, []);
+      const result = replyCfg.enableSearch
+        ? await agentSearchReply(replyCfg, scraped.text, userContent, [], (m) => setStatus(m, 'loading'))
+        : await requestAI(replyCfg, userContent, []);
       previewEl.value = result.text;
       previewEl.classList.add('lsb-success');
       // 回复目标评论，总是带 @目标评论作者 #楼层 前缀（和论坛「引用回复」按钮一致）
