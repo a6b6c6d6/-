@@ -63,6 +63,40 @@
     '请严格输出回帖正文，不要添加任何解释、前缀或后缀；@提及前缀会由脚本自动添加。'
   ].join('\n');
 
+  // 内置语气人设：在默认提示词基础上追加「本次语气要求」，帮助模型更好地切换语气。
+  // 用户可在「提示词管理」里编辑/新增/删除；第 0 条「通用（默认）」为默认，日常都用它。
+  const TONE_PRESETS = [
+    {
+      name: '认真技术流',
+      tone: '以「认真技术流」的口吻回帖：像一个懂行的老手，围绕帖子里的技术点给出有价值的干货——原理、踩坑经验、可行的做法或对比。可以适当带上命令、参数、版本号等具体信息（用行内反引号标注），但要讲得让人看得懂。态度沉稳、就事论事，不玩梗、不灌水，重点是「有用」。',
+      replyTone: '以「认真技术流」的口吻回应这条评论：紧扣对方的技术观点，认可对的地方、补充或修正不准确的地方，给出具体的依据或经验。可带命令/参数等细节，讲清楚为什么。沉稳专业，不抬杠、不玩梗。'
+    },
+    {
+      name: '轻松水贴',
+      tone: '以「轻松水贴」的口吻回帖：简短、口语、接地气，像论坛里随手一水的老哥。可以玩点无伤大雅的梗、适当用 emoji，气氛轻松活跃。不用长篇大论，两三句到位即可，但仍要跟帖子内容对得上，别答非所问。',
+      replyTone: '以「轻松水贴」的口吻回应这条评论：简短、口语、带点玩笑感，像跟熟人搭话。可适当玩梗、用 emoji，但要接得住对方那句话，别尬聊、别跑题。'
+    },
+    {
+      name: '真诚捧场',
+      tone: '以「真诚捧场」的口吻回帖：适合分享帖/教程帖，表达真诚的感谢、认可和鼓励，指出帖子里让你觉得有帮助或有亮点的地方（要具体，别空夸）。语气温暖正向，可适当带 emoji，但不要肉麻、不要一味吹捧。',
+      replyTone: '以「真诚捧场」的口吻回应这条评论：肯定对方说得好的点，给出具体的呼应或补充，让对方感觉到被认真对待。温暖、真诚，不敷衍、不尬吹。'
+    },
+    {
+      name: '犀利吐槽',
+      tone: '以「犀利吐槽」的口吻回帖：幽默、机灵，带点调侃和阴阳怪气的味道，但只对事不对人——可以吐槽现象、产品、槽点，不能人身攻击、不引战、不带脏话。分寸感很重要：让人会心一笑，而不是被冒犯。',
+      replyTone: '以「犀利吐槽」的口吻回应这条评论：接住对方的话头顺势调侃，幽默机灵、带点阴阳，但对事不对人，不攻击对方本人、不引战、不带脏话。点到为止，好笑就行。'
+    }
+  ];
+
+  // 提示词预设默认清单：第 0 条为通用默认，后面是内置语气人设
+  const DEFAULT_PROMPTS = [
+    { name: '通用（默认）', systemPrompt: DEFAULT_SYSTEM_PROMPT, replySystemPrompt: DEFAULT_REPLY_SYSTEM_PROMPT }
+  ].concat(TONE_PRESETS.map((t) => ({
+    name: t.name,
+    systemPrompt: DEFAULT_SYSTEM_PROMPT + '\n\n【本次语气要求】\n' + t.tone,
+    replySystemPrompt: DEFAULT_REPLY_SYSTEM_PROMPT + '\n\n【本次语气要求】\n' + t.replyTone
+  })));
+
   const DEFAULTS = {
     baseUrl: '',
     apiKey: '',
@@ -75,7 +109,10 @@
     maxContextChars: 20000,
     includeSpeaker: true,
     enableImage: true, // 多模态：抓取正文图片一起喂给模型（需模型支持视觉）
-    enableSearch: false // 联网搜索：需中转站/模型支持（responses 或 anthropic 格式）
+    enableSearch: false, // 联网搜索：需中转站/模型支持（responses 或 anthropic 格式）
+    searchBatch: 3, // 联网搜索并行批大小（每批同时发几个搜索子请求）
+    requestTimeout: 180, // 单次请求超时（秒）
+    maxRetry: 2 // 可重试失败的最大重试次数（网络/超时/503 等）
   };
 
   /* ============================================================
@@ -295,6 +332,51 @@
     .lsb-ai-model-item.is-active { background: #eff6ff; color: #2563eb; font-weight: 600; }
     .lsb-ai-model-empty { padding: 8px; font-size: 12px; color: #9ca3af; text-align: center; }
 
+    /* 语气 / 提示词选择行 */
+    .lsb-ai-persona-line { display: flex; gap: 6px; align-items: stretch; }
+    .lsb-ai-persona-line .lsb-ai-select { flex: 1; }
+    #lsb-ai-persona-edit { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
+
+    /* 提示词管理弹窗 */
+    .lsb-ai-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483002;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, .45);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    .lsb-ai-modal.lsb-hidden { display: none; }
+    .lsb-ai-modal-box {
+      width: 560px;
+      max-width: calc(100vw - 32px);
+      max-height: calc(100vh - 48px);
+      display: flex;
+      flex-direction: column;
+      background: #fff;
+      color: #1f2937;
+      border-radius: 14px;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, .3);
+      overflow: hidden;
+      font-size: 13px;
+    }
+    .lsb-ai-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .lsb-ai-modal-body { padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+    .lsb-ai-pe-toprow { display: flex; gap: 6px; }
+    .lsb-ai-pe-toprow .lsb-ai-select { flex: 1; }
+    .lsb-ai-pe-toprow button { flex: 0 0 auto; padding: 6px 10px; }
+    .lsb-ai-pe-actions { display: flex; align-items: center; gap: 10px; }
+    .lsb-ai-pe-actions .lsb-ai-btn { flex: 0 0 auto; }
+    #lsb-ai-pe-status { flex: 1; }
+
     /* 中转站预设：自定义下拉组件 */
     .lsb-ai-profile-dd { position: relative; }
     .lsb-ai-profile-dd-trigger {
@@ -450,6 +532,12 @@
     cfg.temperature = Number(cfg.temperature);
     cfg.maxTokens = Number(cfg.maxTokens);
     cfg.maxContextChars = Number(cfg.maxContextChars);
+    cfg.searchBatch = Number(cfg.searchBatch);
+    cfg.requestTimeout = Number(cfg.requestTimeout);
+    cfg.maxRetry = Number(cfg.maxRetry);
+    if (!(cfg.searchBatch >= 1)) cfg.searchBatch = DEFAULTS.searchBatch;
+    if (!(cfg.requestTimeout >= 5)) cfg.requestTimeout = DEFAULTS.requestTimeout;
+    if (!(cfg.maxRetry >= 0)) cfg.maxRetry = DEFAULTS.maxRetry;
     if (!['responses', 'chat', 'anthropic'].includes(cfg.apiFormat)) cfg.apiFormat = 'responses';
     return cfg;
   }
@@ -468,6 +556,40 @@
 
   function saveProfiles(list) {
     gmSet('profiles', list);
+  }
+
+  // 提示词预设：数组 [{ name, systemPrompt, replySystemPrompt }]，第 0 条为通用默认。
+  // 首次使用（无存储）时用内置清单种子化并落盘。
+  function loadPrompts() {
+    let v = gmGet('prompts', null);
+    if (!Array.isArray(v) || !v.length) {
+      v = DEFAULT_PROMPTS.map((p) => Object.assign({}, p));
+      savePrompts(v);
+    }
+    return v;
+  }
+
+  function savePrompts(list) {
+    gmSet('prompts', list);
+  }
+
+  // 本次生成选用的语气（提示词预设索引）；一次性——生成后归零回默认（第 0 条）
+  let selectedPromptIndex = 0;
+
+  // 取当前生效的提示词预设（选中项无效则回落默认）
+  function getActivePrompt() {
+    const list = loadPrompts();
+    return list[selectedPromptIndex] || list[0] || {
+      name: '通用（默认）',
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      replySystemPrompt: DEFAULT_REPLY_SYSTEM_PROMPT
+    };
+  }
+
+  // 生成结束后把语气选择复位到默认（第 0 条）
+  function resetSelectedPrompt() {
+    selectedPromptIndex = 0;
+    refreshPersonaSelect();
   }
 
   // 已拉取的模型 id 列表（内存），供自定义筛选下拉渲染
@@ -1170,7 +1292,10 @@
       body = { model: cfg.model, instructions: system, input: [{ role: 'user', content: content }], temperature: cfg.temperature, max_output_tokens: cfg.maxTokens };
       if (opts.tools) body.tools = opts.tools;
     }
-    return { url, headers, body, isAnthropic, isChat };
+    // 把超时/重试次数随请求带下去，供 sendRequestOnce/sendRequest 读取（可在设置里调）
+    const timeout = (Number(cfg.requestTimeout) >= 5 ? Number(cfg.requestTimeout) : 180) * 1000;
+    const maxRetry = (Number(cfg.maxRetry) >= 0 ? Number(cfg.maxRetry) : 2);
+    return { url, headers, body, isAnthropic, isChat, timeout, maxRetry };
   }
 
   const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1179,11 +1304,12 @@
 
   // 单次请求并解析，返回 { text, searched }；失败时给 error 打 retriable 标记供上层判断
   function sendRequestOnce(req) {
+    const timeoutMs = req.timeout || 180000;
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'POST',
         url: req.url,
-        timeout: 180000, // 180 秒
+        timeout: timeoutMs,
         headers: req.headers,
         data: JSON.stringify(req.body),
         onload: (resp) => {
@@ -1213,7 +1339,7 @@
           }
         },
         onerror: () => { const e = new Error('网络错误，请求未能完成，请检查网络或 Base URL'); e.retriable = true; reject(e); },
-        ontimeout: () => { const e = new Error('请求超时（超过 180 秒），请稍后重试'); e.retriable = true; reject(e); },
+        ontimeout: () => { const e = new Error('请求超时（超过 ' + Math.round(timeoutMs / 1000) + ' 秒），请稍后重试'); e.retriable = true; reject(e); },
         onabort: () => reject(new Error('请求已取消')) // 用户取消不重试
       });
     });
@@ -1222,7 +1348,7 @@
   // 带自动重试的发送：仅对可重试失败（网络错误 / 超时 / 503 等）重试，最多 2 次，退避 1s→2s。
   // 加在最底层，故每次调用各自独立重试：阶段3 某个并行子搜索失败只重试它自己，不影响兄弟、不重跑整个流程。
   async function sendRequest(req, onRetry) {
-    const MAX_RETRY = 2;
+    const MAX_RETRY = (req && req.maxRetry != null) ? req.maxRetry : 2;
     for (let attempt = 0; ; attempt++) {
       try {
         return await sendRequestOnce(req);
@@ -1306,7 +1432,7 @@
     }
 
     // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，结果合并）
-    const BATCH = 3;
+    const BATCH = (Number(cfg.searchBatch) >= 1 ? Math.floor(Number(cfg.searchBatch)) : 3);
     const searchItems = [];
     for (const p of pairs) {
       searchItems.push({ label: p.kw, query: p.kw });
@@ -1373,16 +1499,22 @@
       const v = Number($(id).value);
       return isNaN(v) ? def : v;
     };
+    // 提示词正文不再放在设置面板里，改由「提示词管理」维护；这里从默认预设（第 0 条）取，
+    // 让 cfg.systemPrompt/replySystemPrompt 始终等于默认语气，兼容底层调用。
+    const defPrompt = loadPrompts()[0] || {};
     return {
       baseUrl: $('baseUrl').value.trim(),
       apiKey: $('apiKey').value.trim(),
       model: $('model').value.trim(),
       apiFormat: $('apiFormat').value,
-      systemPrompt: $('systemPrompt').value,
-      replySystemPrompt: $('replySystemPrompt').value,
+      systemPrompt: defPrompt.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+      replySystemPrompt: defPrompt.replySystemPrompt || DEFAULT_REPLY_SYSTEM_PROMPT,
       temperature: Math.min(2, Math.max(0, num('temperature', DEFAULTS.temperature))),
       maxTokens: num('maxTokens', DEFAULTS.maxTokens),
       maxContextChars: num('maxContextChars', DEFAULTS.maxContextChars),
+      searchBatch: Math.max(1, num('searchBatch', DEFAULTS.searchBatch)),
+      requestTimeout: Math.max(5, num('requestTimeout', DEFAULTS.requestTimeout)),
+      maxRetry: Math.max(0, num('maxRetry', DEFAULTS.maxRetry)),
       includeSpeaker: $('includeSpeaker').checked,
       enableImage: $('enableImage').checked,
       enableSearch: $('enableSearch').checked
@@ -1395,11 +1527,12 @@
     $('apiKey').value = cfg.apiKey;
     $('model').value = cfg.model;
     $('apiFormat').value = cfg.apiFormat;
-    $('systemPrompt').value = cfg.systemPrompt;
-    $('replySystemPrompt').value = cfg.replySystemPrompt;
     $('temperature').value = cfg.temperature;
     $('maxTokens').value = cfg.maxTokens;
     $('maxContextChars').value = cfg.maxContextChars;
+    $('searchBatch').value = cfg.searchBatch;
+    $('requestTimeout').value = cfg.requestTimeout;
+    $('maxRetry').value = cfg.maxRetry;
     $('includeSpeaker').checked = !!cfg.includeSpeaker;
     $('enableImage').checked = !!cfg.enableImage;
     $('enableSearch').checked = !!cfg.enableSearch;
@@ -1534,6 +1667,151 @@
     setStatus('已删除预设「' + label + '」', 'ok');
   }
 
+  // ===== 提示词管理 UI =====
+  // 主面板「语气 / 提示词」下拉：列出所有提示词预设，选中项为本次生成语气（一次性）
+  function refreshPersonaSelect() {
+    const sel = document.getElementById('lsb-ai-persona');
+    if (!sel) return;
+    const list = loadPrompts();
+    if (selectedPromptIndex >= list.length || selectedPromptIndex < 0) selectedPromptIndex = 0;
+    sel.innerHTML = '';
+    list.forEach((p, i) => {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = (i === 0 ? '' : '语气：') + (p.name || ('提示词 ' + (i + 1)));
+      sel.appendChild(opt);
+    });
+    sel.value = String(selectedPromptIndex);
+  }
+
+  // 弹窗内当前编辑的提示词索引
+  let peIndex = 0;
+
+  function setPeStatus(msg) {
+    const el = document.getElementById('lsb-ai-pe-status');
+    if (el) el.textContent = msg;
+  }
+
+  // 刷新弹窗内的提示词下拉
+  function refreshPeSelect() {
+    const sel = document.getElementById('lsb-ai-pe-select');
+    if (!sel) return;
+    const list = loadPrompts();
+    if (peIndex >= list.length || peIndex < 0) peIndex = 0;
+    sel.innerHTML = '';
+    list.forEach((p, i) => {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = (p.name || ('提示词 ' + (i + 1))) + (i === 0 ? '（默认）' : '');
+      sel.appendChild(opt);
+    });
+    sel.value = String(peIndex);
+  }
+
+  // 把指定提示词的正文载入弹窗两个文本框
+  function loadPeInto(index) {
+    const list = loadPrompts();
+    const p = list[index] || {};
+    peIndex = index;
+    const sys = document.getElementById('lsb-ai-pe-system');
+    const rep = document.getElementById('lsb-ai-pe-reply');
+    if (sys) sys.value = p.systemPrompt || '';
+    if (rep) rep.value = p.replySystemPrompt || '';
+  }
+
+  function openPromptEditor() {
+    const modal = document.getElementById('lsb-ai-prompt-editor');
+    if (!modal) return;
+    // 默认编辑当前主面板选中的语气，方便「选了想改就改」
+    peIndex = selectedPromptIndex || 0;
+    refreshPeSelect();
+    loadPeInto(peIndex);
+    setPeStatus('切换上方下拉可编辑不同提示词；改完记得点「保存提示词」。');
+    modal.classList.remove('lsb-hidden');
+  }
+
+  function closePromptEditor() {
+    const modal = document.getElementById('lsb-ai-prompt-editor');
+    if (modal) modal.classList.add('lsb-hidden');
+  }
+
+  // 保存弹窗内当前提示词正文
+  function savePromptFromEditor() {
+    const list = loadPrompts();
+    const p = list[peIndex];
+    if (!p) return;
+    const sys = document.getElementById('lsb-ai-pe-system');
+    const rep = document.getElementById('lsb-ai-pe-reply');
+    p.systemPrompt = sys ? sys.value : p.systemPrompt;
+    p.replySystemPrompt = rep ? rep.value : p.replySystemPrompt;
+    savePrompts(list);
+    // 若改的是默认（第 0 条），同步进已保存配置，保证底层调用拿到最新默认提示词
+    if (peIndex === 0) {
+      const cfg = loadConfig();
+      cfg.systemPrompt = p.systemPrompt;
+      cfg.replySystemPrompt = p.replySystemPrompt;
+      saveConfig(cfg);
+    }
+    refreshPersonaSelect();
+    setPeStatus('已保存「' + (p.name || ('提示词 ' + (peIndex + 1))) + '」✓');
+  }
+
+  function newPrompt() {
+    let name = '新语气';
+    try {
+      const input = prompt('新提示词名称：', name);
+      if (input === null) return;
+      if (input.trim()) name = input.trim();
+    } catch (e) { /* prompt 不可用则用默认名 */ }
+    const list = loadPrompts();
+    // 新建的以默认提示词为模板，方便在此基础上改语气
+    list.push({
+      name: name,
+      systemPrompt: (list[0] && list[0].systemPrompt) || DEFAULT_SYSTEM_PROMPT,
+      replySystemPrompt: (list[0] && list[0].replySystemPrompt) || DEFAULT_REPLY_SYSTEM_PROMPT
+    });
+    savePrompts(list);
+    refreshPeSelect();
+    loadPeInto(list.length - 1);
+    document.getElementById('lsb-ai-pe-select').value = String(list.length - 1);
+    refreshPersonaSelect();
+    setPeStatus('已新建「' + name + '」，可编辑正文后保存');
+  }
+
+  function renamePrompt() {
+    const list = loadPrompts();
+    const p = list[peIndex];
+    if (!p) return;
+    try {
+      const input = prompt('新名称：', p.name || '');
+      if (input === null) return;
+      if (input.trim()) p.name = input.trim();
+    } catch (e) { return; }
+    savePrompts(list);
+    refreshPeSelect();
+    refreshPersonaSelect();
+    setPeStatus('已重命名为「' + p.name + '」');
+  }
+
+  function deletePrompt() {
+    if (peIndex === 0) { setPeStatus('默认提示词不能删除'); return; }
+    const list = loadPrompts();
+    const p = list[peIndex];
+    if (!p) return;
+    const label = p.name || ('提示词 ' + (peIndex + 1));
+    try {
+      if (!confirm('删除提示词「' + label + '」？')) return;
+    } catch (e) { /* confirm 不可用则直接删 */ }
+    list.splice(peIndex, 1);
+    savePrompts(list);
+    if (selectedPromptIndex >= list.length) selectedPromptIndex = 0;
+    peIndex = 0;
+    refreshPeSelect();
+    loadPeInto(0);
+    refreshPersonaSelect();
+    setPeStatus('已删除「' + label + '」');
+  }
+
   function validateConfig(cfg) {
     if (!cfg.baseUrl) return '请先在设置中填写 API Base URL';
     if (!cfg.apiKey) return '请先在设置中填写 API Key';
@@ -1557,6 +1835,14 @@
           <button type="button" class="lsb-target-clear" id="lsb-ai-target-clear" style="display:none">取消</button>
         </div>
         <button type="button" class="lsb-ai-btn lsb-ai-btn-primary" id="lsb-ai-generate">抓取并生成回复</button>
+
+        <div class="lsb-ai-row lsb-ai-persona-row">
+          <label class="lsb-ai-label">语气 / 提示词（默认通用；选其他仅对本次生成生效，生成后自动恢复默认）</label>
+          <div class="lsb-ai-persona-line">
+            <select class="lsb-ai-select" id="lsb-ai-persona"></select>
+            <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-persona-edit" title="编辑 / 新增 / 删除提示词">✎ 编辑</button>
+          </div>
+        </div>
 
         <div class="lsb-ai-row" id="lsb-ai-scope-row">
           <label class="lsb-ai-label">抓取范围（未选目标评论时生效）</label>
@@ -1644,6 +1930,20 @@
               <label class="lsb-ai-label">抓取内容最大字符数</label>
               <input class="lsb-ai-input" id="lsb-ai-cfg-maxContextChars" type="number" min="100" step="100">
             </div>
+            <div class="lsb-ai-number-row">
+              <div class="lsb-ai-row">
+                <label class="lsb-ai-label">联网并行批大小</label>
+                <input class="lsb-ai-input" id="lsb-ai-cfg-searchBatch" type="number" min="1" step="1">
+              </div>
+              <div class="lsb-ai-row">
+                <label class="lsb-ai-label">请求超时（秒）</label>
+                <input class="lsb-ai-input" id="lsb-ai-cfg-requestTimeout" type="number" min="5" step="5">
+              </div>
+              <div class="lsb-ai-row">
+                <label class="lsb-ai-label">失败重试次数</label>
+                <input class="lsb-ai-input" id="lsb-ai-cfg-maxRetry" type="number" min="0" step="1">
+              </div>
+            </div>
             <div class="lsb-ai-check-row">
               <input type="checkbox" id="lsb-ai-cfg-includeSpeaker">
               <label for="lsb-ai-cfg-includeSpeaker">抓取内容中包含发言人标识（【楼主/用户：xxx】）</label>
@@ -1657,12 +1957,7 @@
               <label for="lsb-ai-cfg-enableSearch">联网搜索（需中转站/模型支持，建议配合 Responses 或 Anthropic 格式）</label>
             </div>
             <div class="lsb-ai-row">
-              <label class="lsb-ai-label">系统提示词（水贴 · 总结式回帖）</label>
-              <textarea class="lsb-ai-textarea" id="lsb-ai-cfg-systemPrompt" rows="5"></textarea>
-            </div>
-            <div class="lsb-ai-row">
-              <label class="lsb-ai-label">系统提示词（水评论 · 针对评论回应）</label>
-              <textarea class="lsb-ai-textarea" id="lsb-ai-cfg-replySystemPrompt" rows="5"></textarea>
+              <span class="lsb-ai-hint">系统提示词已移到上方「语气 / 提示词」——点那里的「✎ 编辑」可增删改各套提示词。</span>
             </div>
             <div class="lsb-ai-hint">所有配置仅保存在本地浏览器中，不会上传；API Key 不会出现在日志或页面中。</div>
             <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-save">保存设置</button>
@@ -1673,7 +1968,44 @@
 
     document.body.appendChild(panel);
 
-    statusEl = document.getElementById('lsb-ai-status');
+    // 提示词管理弹窗（独立于面板，避免被面板 overflow:hidden 裁切）
+    const promptEditor = document.createElement('div');
+    promptEditor.id = 'lsb-ai-prompt-editor';
+    promptEditor.className = 'lsb-ai-modal lsb-hidden';
+    promptEditor.innerHTML = `
+      <div class="lsb-ai-modal-box">
+        <div class="lsb-ai-modal-header">
+          <span class="lsb-ai-title">提示词管理</span>
+          <button type="button" class="lsb-ai-close" id="lsb-ai-pe-close" title="关闭">×</button>
+        </div>
+        <div class="lsb-ai-modal-body">
+          <div class="lsb-ai-row">
+            <label class="lsb-ai-label">选择要编辑的提示词</label>
+            <div class="lsb-ai-pe-toprow">
+              <select class="lsb-ai-select" id="lsb-ai-pe-select"></select>
+              <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-pe-new">新建</button>
+              <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-pe-rename">重命名</button>
+              <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-pe-del">删除</button>
+            </div>
+          </div>
+          <div class="lsb-ai-row">
+            <label class="lsb-ai-label">水贴提示词（总结式回帖）</label>
+            <textarea class="lsb-ai-textarea" id="lsb-ai-pe-system" rows="8"></textarea>
+          </div>
+          <div class="lsb-ai-row">
+            <label class="lsb-ai-label">水回应提示词（针对单条评论）</label>
+            <textarea class="lsb-ai-textarea" id="lsb-ai-pe-reply" rows="8"></textarea>
+          </div>
+          <div class="lsb-ai-pe-actions">
+            <button type="button" class="lsb-ai-btn lsb-ai-btn-primary" id="lsb-ai-pe-save">保存提示词</button>
+            <span class="lsb-ai-hint" id="lsb-ai-pe-status">切换上方下拉可编辑不同提示词；改完记得点「保存提示词」。</span>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(promptEditor);
+
+
     previewEl = document.getElementById('lsb-ai-preview');
     generateBtn = document.getElementById('lsb-ai-generate');
 
@@ -1776,6 +2108,29 @@
 
     makeDraggable(panel, panel.querySelector('.lsb-ai-header'));
     writeConfigToUI(loadConfig());
+
+    // 语气 / 提示词下拉 + 编辑弹窗
+    const personaSel = document.getElementById('lsb-ai-persona');
+    personaSel.addEventListener('change', () => {
+      const v = parseInt(personaSel.value, 10);
+      selectedPromptIndex = isNaN(v) ? 0 : v;
+    });
+    document.getElementById('lsb-ai-persona-edit').addEventListener('click', openPromptEditor);
+    document.getElementById('lsb-ai-pe-close').addEventListener('click', closePromptEditor);
+    document.getElementById('lsb-ai-pe-select').addEventListener('change', (e) => {
+      const v = parseInt(e.target.value, 10);
+      loadPeInto(isNaN(v) ? 0 : v);
+      setPeStatus('正在编辑「' + (loadPrompts()[peIndex] || {}).name + '」');
+    });
+    document.getElementById('lsb-ai-pe-new').addEventListener('click', newPrompt);
+    document.getElementById('lsb-ai-pe-rename').addEventListener('click', renamePrompt);
+    document.getElementById('lsb-ai-pe-del').addEventListener('click', deletePrompt);
+    document.getElementById('lsb-ai-pe-save').addEventListener('click', savePromptFromEditor);
+    // 点弹窗遮罩空白处关闭
+    document.getElementById('lsb-ai-prompt-editor').addEventListener('click', (e) => {
+      if (e.target.id === 'lsb-ai-prompt-editor') closePromptEditor();
+    });
+    refreshPersonaSelect();
   }
 
   function makeDraggable(el, handle) {
@@ -1941,19 +2296,24 @@
     previewEl.classList.remove('lsb-success');
 
     try {
+      // 本次生成使用选中的语气提示词（默认第 0 条）
+      const persona = getActivePrompt();
+      const genCfg = Object.assign({}, cfg, { systemPrompt: persona.systemPrompt || cfg.systemPrompt });
       const userContent = buildUserContent(scraped.text);
-      const result = cfg.enableSearch
-        ? await agentSearchReply(cfg, scraped.text, userContent, scraped.images, (m) => setStatus(m, 'loading'))
-        : await requestAI(cfg, userContent, scraped.images);
+      const result = genCfg.enableSearch
+        ? await agentSearchReply(genCfg, scraped.text, userContent, scraped.images, (m) => setStatus(m, 'loading'))
+        : await requestAI(genCfg, userContent, scraped.images);
       previewEl.value = result.text;
       previewEl.classList.add('lsb-success');
       const imgNote = (scraped.images && scraped.images.length) ? ('（已附带 ' + scraped.images.length + ' 张图片）') : '';
       const searchNote = (cfg.enableSearch && !result.searched) ? '（⚠ 未检测到联网搜索，结果可能基于模型知识）' : '';
-      setStatus('生成成功' + imgNote + searchNote + '，可手动修改后点击「填入编辑器」', 'ok');
+      const toneNote = (selectedPromptIndex > 0) ? ('（语气：' + (persona.name || '') + '）') : '';
+      setStatus('生成成功' + toneNote + imgNote + searchNote + '，可手动修改后点击「填入编辑器」', 'ok');
     } catch (e) {
       setStatus(e.message || '生成失败', 'error');
     } finally {
       setGenerating(false);
+      resetSelectedPrompt(); // 语气一次性，用完恢复默认
     }
   }
 
@@ -1989,8 +2349,10 @@
         floor: currentTarget.floor,
         isOwner: scraped.targetIsOwner
       });
-      // 针对评论的回应，使用「水评论」提示词
-      const replyCfg = Object.assign({}, cfg, { systemPrompt: cfg.replySystemPrompt || cfg.systemPrompt });
+      // 针对评论的回应，使用选中语气的「水评论」提示词（默认第 0 条）
+      const persona = getActivePrompt();
+      const replyPrompt = persona.replySystemPrompt || persona.systemPrompt || cfg.replySystemPrompt || cfg.systemPrompt;
+      const replyCfg = Object.assign({}, cfg, { systemPrompt: replyPrompt });
       const result = replyCfg.enableSearch
         ? await agentSearchReply(replyCfg, scraped.text, userContent, [], (m) => setStatus(m, 'loading'))
         : await requestAI(replyCfg, userContent, []);
@@ -2000,11 +2362,13 @@
       replyPrefix = '@' + currentTarget.username + (currentTarget.floor ? (' #' + currentTarget.floor) : '') + ' ';
       const note = scraped.hasMention ? '（已追溯对话链，填入时会自动带 @前缀）' : '（该评论无 @，按帖子+评论生成，仍会带 @前缀）';
       const searchNote = (cfg.enableSearch && !result.searched) ? '（⚠ 未检测到联网搜索，结果可能基于模型知识）' : '';
-      setStatus('回应生成成功' + note + searchNote + '，可修改后点「填入编辑器」', 'ok');
+      const toneNote = (selectedPromptIndex > 0) ? ('（语气：' + (persona.name || '') + '）') : '';
+      setStatus('回应生成成功' + toneNote + note + searchNote + '，可修改后点「填入编辑器」', 'ok');
     } catch (e) {
       setStatus(e.message || '生成失败', 'error');
     } finally {
       setGenerating(false);
+      resetSelectedPrompt(); // 语气一次性，用完恢复默认
     }
   }
 
