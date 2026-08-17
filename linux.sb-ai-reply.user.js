@@ -255,6 +255,28 @@
     .lsb-ai-status.lsb-error { color: #dc2626; }
     .lsb-ai-status.lsb-loading { color: #2563eb; }
 
+    /* 生成过程「视奸」窗：累积显示各阶段进度 + 搜索关键词，可折叠 */
+    .lsb-ai-log-wrap { border: 1px solid #dbeafe; border-radius: 8px; overflow: hidden; background: #f8fafc; }
+    .lsb-ai-log-wrap.lsb-hidden { display: none; }
+    .lsb-ai-log-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 5px 9px; background: #eff6ff; cursor: pointer; user-select: none;
+    }
+    .lsb-ai-log-title { font-size: 12px; font-weight: 600; color: #1e40af; }
+    .lsb-ai-log-toggle { font-size: 12px; color: #2563eb; transition: transform .15s ease; }
+    .lsb-ai-log-wrap.collapsed .lsb-ai-log-toggle { transform: rotate(-90deg); }
+    .lsb-ai-log-body {
+      max-height: 150px; overflow-y: auto; padding: 6px 9px;
+      font-size: 11px; line-height: 1.55; color: #334155;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+    }
+    .lsb-ai-log-wrap.collapsed .lsb-ai-log-body { display: none; }
+    .lsb-ai-log-line { padding: 1px 0; word-break: break-all; }
+    .lsb-ai-log-line .lsb-ai-log-idx { color: #94a3b8; margin-right: 6px; }
+    .lsb-ai-log-line.lsb-kw { color: #7c3aed; }
+    .lsb-ai-log-line.lsb-warn { color: #d97706; }
+    .lsb-ai-log-line.lsb-done { color: #059669; }
+
     .lsb-ai-preview {
       min-height: 110px;
       border: 1px solid #d1d5db;
@@ -1361,8 +1383,111 @@
     }
   }
 
+  // 从一行 SSE 数据里抽出增量文本（按三格式分别解析），非文本增量返回 ''
+  function extractStreamDelta(line, req) {
+    let s = String(line || '').trim();
+    if (!s || s.startsWith('event:') || s.startsWith(':')) return '';
+    if (s.startsWith('data:')) s = s.slice(5).trim();
+    if (!s || s === '[DONE]') return '';
+    let j;
+    try { j = JSON.parse(s); } catch (e) { return ''; }
+    if (req.isAnthropic) {
+      // content_block_delta → delta.text（text_delta）
+      if (j.type === 'content_block_delta' && j.delta && typeof j.delta.text === 'string') return j.delta.text;
+      return '';
+    }
+    if (req.isChat) {
+      const d = j.choices && j.choices[0] && j.choices[0].delta;
+      return (d && typeof d.content === 'string') ? d.content : '';
+    }
+    // responses：response.output_text.delta 事件，delta 为字符串
+    if (typeof j.delta === 'string' && (!j.type || /output_text\.delta/.test(j.type))) return j.delta;
+    return '';
+  }
+
+  // 流式单次请求：body 加 stream=true，用 onprogress 累积 responseText 增量解析，回吐 token。
+  // 服务端若没按流返回（onprogress 无增量），onload 里退回整体解析，保证兼容。
+  function sendRequestStreamOnce(req, onToken) {
+    const timeoutMs = req.timeout || 180000;
+    const body = Object.assign({}, req.body, { stream: true });
+    return new Promise((resolve, reject) => {
+      let full = '';
+      let cursor = 0; // 已解析到的 responseText 位置
+      const feedComplete = (buf) => {
+        // 只解析到最后一个换行为止（末尾半行留到下次 / onload）
+        const chunk = buf.slice(cursor);
+        const lastNl = chunk.lastIndexOf('\n');
+        if (lastNl < 0) return;
+        const ready = chunk.slice(0, lastNl);
+        cursor += lastNl + 1;
+        ready.split('\n').forEach((line) => {
+          const d = extractStreamDelta(line, req);
+          if (d) { full += d; try { onToken(d); } catch (_) { /* 忽略回调异常 */ } }
+        });
+      };
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: req.url,
+        timeout: timeoutMs,
+        headers: req.headers,
+        data: JSON.stringify(body),
+        onprogress: (resp) => { if (resp && resp.responseText) feedComplete(resp.responseText); },
+        onload: (resp) => {
+          const status = resp.status;
+          const raw = resp.responseText || '';
+          if (status >= 200 && status < 300) {
+            // 解析剩余尾部（onload 时末行已完整）
+            raw.slice(cursor).split('\n').forEach((line) => {
+              const d = extractStreamDelta(line, req);
+              if (d) { full += d; try { onToken(d); } catch (_) { /* 忽略 */ } }
+            });
+            if (full.trim()) { resolve({ text: full.trim(), searched: /web_search/i.test(raw) }); return; }
+            // 没流出来 → 退回整体解析（服务端可能忽略了 stream）
+            try {
+              let text;
+              if (req.isAnthropic) {
+                text = raw.trimStart().startsWith('{') ? parseAnthropicJson(JSON.parse(raw)) : parseAnthropicSse(raw);
+              } else if (req.isChat) {
+                text = parseChat(JSON.parse(raw));
+              } else {
+                text = parseResponses(JSON.parse(raw));
+              }
+              resolve({ text: text.trim(), searched: /web_search/i.test(raw) });
+            } catch (e) {
+              reject(new Error(e.message || '响应解析失败'));
+            }
+          } else {
+            const err = new Error(apiErrorMessage(status, raw));
+            err.retriable = RETRIABLE_STATUS.indexOf(status) >= 0;
+            reject(err);
+          }
+        },
+        onerror: () => { const e = new Error('网络错误，请求未能完成，请检查网络或 Base URL'); e.retriable = true; reject(e); },
+        ontimeout: () => { const e = new Error('请求超时（超过 ' + Math.round(timeoutMs / 1000) + ' 秒），请稍后重试'); e.retriable = true; reject(e); },
+        onabort: () => reject(new Error('请求已取消'))
+      });
+    });
+  }
+
+  // 带重试的流式发送：可重试失败时先 onReset（清空已流出的预览）再从头重来，避免 token 重复拼接。
+  async function sendRequestStream(req, onToken, onRetry, onReset) {
+    const MAX_RETRY = (req && req.maxRetry != null) ? req.maxRetry : 2;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await sendRequestStreamOnce(req, onToken);
+      } catch (e) {
+        if (!e.retriable || attempt === MAX_RETRY) throw e;
+        const wait = 1000 * (attempt + 1);
+        if (typeof onReset === 'function') { try { onReset(); } catch (_) { /* 忽略 */ } }
+        if (typeof onRetry === 'function') { try { onRetry(attempt + 1, MAX_RETRY, e, wait); } catch (_) { /* 忽略 */ } }
+        await delay(wait);
+      }
+    }
+  }
+
   // 单次调用（联网开关打开时注入搜索工具 + 使用指导）
-  function requestAI(cfg, userContent, images) {
+  // hooks 可选：{ onToken, onRetry, onReset } —— 传了 onToken 则走流式（边生成边回吐 token）
+  function requestAI(cfg, userContent, images, hooks) {
     const useSearch = !!cfg.enableSearch;
     const sysPrompt = useSearch ? (cfg.systemPrompt + SEARCH_GUIDANCE) : cfg.systemPrompt;
     const req = buildRequest(cfg, {
@@ -1371,6 +1496,9 @@
       images: images,
       tools: useSearch ? searchTools(cfg) : undefined
     });
+    if (hooks && typeof hooks.onToken === 'function') {
+      return sendRequestStream(req, hooks.onToken, hooks.onRetry, hooks.onReset);
+    }
     return sendRequest(req);
   }
 
@@ -1410,8 +1538,15 @@
   }
 
   // 四阶段联网搜索编排：规划 → JSON解析 → 分批并行搜 → 汇总
-  async function agentSearchReply(cfg, rawText, finalUserContent, images, onProgress) {
+  // hooks 可选：{ onToken, onRetry, onReset } —— 仅最终「汇总生成」/「降级生成」阶段走流式
+  async function agentSearchReply(cfg, rawText, finalUserContent, images, onProgress, hooks) {
     const progress = onProgress || function () {};
+    const streamFinal = (req) => {
+      if (hooks && typeof hooks.onToken === 'function') {
+        return sendRequestStream(req, hooks.onToken, hooks.onRetry, hooks.onReset);
+      }
+      return sendRequest(req, (n, max, e, wait) => progress('生成请求失败，' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn'));
+    };
 
     // 阶段1：规划关键词（不带搜索工具，输出 {kw, fallback} 关键词对）
     progress('正在分析帖子、提炼搜索关键词…');
@@ -1421,15 +1556,22 @@
       images: undefined,
       tools: undefined
     });
-    const planRes = await sendRequest(planReq, (n, max, e, wait) => progress('规划请求失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…'));
+    const planRes = await sendRequest(planReq, (n, max, e, wait) => progress('规划请求失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn'));
     const pairs = parsePairs(planRes.text);
 
     if (!pairs.length) {
       // 无需搜索 → 降级普通生成（不带搜索工具）
       progress('无需联网搜索，直接生成…');
       const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalUserContent, images: images, tools: undefined });
-      return sendRequest(req, (n, max, e, wait) => progress('生成请求失败，' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…'));
+      return streamFinal(req);
     }
+
+    // 把提炼出的关键词逐条打进过程窗，方便用户「视奸」搜了啥
+    progress('提炼出 ' + pairs.length + ' 组关键词：', 'kw');
+    pairs.forEach((p, i) => {
+      const fb = (p.fallback && p.fallback !== p.kw) ? ('  ↩泛化：' + p.fallback) : '';
+      progress('  ' + (i + 1) + '. ' + p.kw + fb, 'kw');
+    });
 
     // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，结果合并）
     const BATCH = (Number(cfg.searchBatch) >= 1 ? Math.floor(Number(cfg.searchBatch)) : 3);
@@ -1444,15 +1586,17 @@
     const searchTexts = [];
     for (let i = 0; i < searchItems.length; i += BATCH) {
       const batch = searchItems.slice(i, i + BATCH);
-      progress('并行搜索 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批（' + batch.length + ' 次）…');
+      progress('并行搜索 ' + (i / BATCH + 1) + '/' + totalBatches + ' 批（' + batch.map(b => b.query).join(' | ') + '）…');
       const reqs = batch.map(item => buildRequest(cfg, {
         system: '你是一个联网搜索助手。请对用户给出的关键词执行联网搜索，并把搜索结果的内容整理出来。',
         userContent: item.query,
         images: undefined,
         tools: searchTools(cfg)
       }));
-      const ress = await Promise.all(reqs.map(r => sendRequest(r, () => progress('部分搜索超时/失败，正在自动重试…')).catch(e => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
+      const ress = await Promise.all(reqs.map(r => sendRequest(r, () => progress('部分搜索超时/失败，正在自动重试…', 'warn')).catch(e => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
       ress.forEach((r, idx) => {
+        const ok = r.searched !== false && !/^\(搜索失败/.test(r.text);
+        progress('  ✓ ' + batch[idx].label + '：' + (ok ? (r.text.length + ' 字') : '失败/无结果'), ok ? 'done' : 'warn');
         searchTexts.push('【关键词：' + batch[idx].label + '】\n' + r.text);
       });
     }
@@ -1461,7 +1605,7 @@
     progress('搜索完成，正在汇总生成回帖…');
     const finalContent = finalUserContent + '\n\n【注意】若下面的搜索结果中出现了与帖子原文名称不一致的正确写法（如产品名、会员名、品牌名等），请结合帖子整体上下文判断作者真正想表达的，并在回帖中使用正确写法，不要照搬帖子里的明显拼写错误。\n\n=== 联网搜索到的相关信息（仅供参考，可能不准确或过时）===\n\n' + searchTexts.join('\n\n');
     const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalContent, images: images, tools: undefined });
-    const r = await sendRequest(req, (n, max, e, wait) => progress('汇总请求失败，' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…'));
+    const r = await streamFinal(req);
     return { text: r.text, searched: true };
   }
 
@@ -1474,11 +1618,42 @@
   let statusEl = null;
   let previewEl = null;
   let generateBtn = null;
+  let logWrapEl = null;
+  let logBodyEl = null;
+  let logIdx = 0;
 
   function setStatus(msg, type) {
     if (!statusEl) return;
     statusEl.textContent = msg || '';
     statusEl.className = 'lsb-ai-status lsb-' + (type || 'info');
+  }
+
+  // 「视奸」过程窗：清空 / 追加一行 / 显示 / 隐藏
+  function clearLog() {
+    logIdx = 0;
+    if (logBodyEl) logBodyEl.textContent = '';
+  }
+  function showLog(on) {
+    if (!logWrapEl) return;
+    logWrapEl.classList.toggle('lsb-hidden', !on);
+  }
+  function appendLog(msg, kind) {
+    if (!logBodyEl) return;
+    logIdx += 1;
+    const line = document.createElement('div');
+    line.className = 'lsb-ai-log-line' + (kind ? ' lsb-' + kind : '');
+    const idx = document.createElement('span');
+    idx.className = 'lsb-ai-log-idx';
+    idx.textContent = String(logIdx).padStart(2, '0');
+    line.appendChild(idx);
+    line.appendChild(document.createTextNode(msg || ''));
+    logBodyEl.appendChild(line);
+    logBodyEl.scrollTop = logBodyEl.scrollHeight; // 自动滚到底部
+  }
+  // 生成期统一进度出口：单行状态（最新）+ 过程窗（累积）
+  function reportProgress(msg, kind) {
+    setStatus(msg, 'loading');
+    appendLog(msg, kind);
   }
 
   function setGenerating(on) {
@@ -1859,6 +2034,14 @@
 
         <div class="lsb-ai-status lsb-info" id="lsb-ai-status">选目标评论则针对回复，未选则总结全帖；点「抓取并生成回复」</div>
 
+        <div class="lsb-ai-log-wrap lsb-hidden" id="lsb-ai-log-wrap">
+          <div class="lsb-ai-log-head" id="lsb-ai-log-head">
+            <span class="lsb-ai-log-title">🔍 生成过程（视奸）</span>
+            <span class="lsb-ai-log-toggle" id="lsb-ai-log-toggle" title="折叠 / 展开">▾</span>
+          </div>
+          <div class="lsb-ai-log-body" id="lsb-ai-log"></div>
+        </div>
+
         <div class="lsb-ai-row">
           <label class="lsb-ai-label">回复预览（可编辑）</label>
           <textarea class="lsb-ai-textarea lsb-ai-preview" id="lsb-ai-preview" placeholder="生成的回复将显示在此处，可手动修改"></textarea>
@@ -2008,6 +2191,12 @@
 
     previewEl = document.getElementById('lsb-ai-preview');
     generateBtn = document.getElementById('lsb-ai-generate');
+    logWrapEl = document.getElementById('lsb-ai-log-wrap');
+    logBodyEl = document.getElementById('lsb-ai-log');
+    // 过程窗折叠 / 展开（点标题栏）
+    document.getElementById('lsb-ai-log-head').addEventListener('click', () => {
+      logWrapEl.classList.toggle('collapsed');
+    });
 
     fab = document.createElement('button');
     fab.id = FAB_ID;
@@ -2294,22 +2483,35 @@
 
     setGenerating(true);
     previewEl.classList.remove('lsb-success');
+    previewEl.value = '';
+    clearLog();
+    showLog(true);
+    logWrapEl.classList.remove('collapsed');
 
     try {
       // 本次生成使用选中的语气提示词（默认第 0 条）
       const persona = getActivePrompt();
       const genCfg = Object.assign({}, cfg, { systemPrompt: persona.systemPrompt || cfg.systemPrompt });
       const userContent = buildUserContent(scraped.text);
+      appendLog(genCfg.enableSearch ? '联网模式：多阶段搜索 + 汇总生成…' : '直接生成（未开联网，流式输出）…');
+      // 流式钩子：token 实时进预览区；重试时清空已流出的内容重来
+      const streamHooks = {
+        onToken: (d) => { previewEl.value += d; previewEl.scrollTop = previewEl.scrollHeight; },
+        onReset: () => { previewEl.value = ''; },
+        onRetry: (n, max, e, wait) => reportProgress('生成失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn')
+      };
       const result = genCfg.enableSearch
-        ? await agentSearchReply(genCfg, scraped.text, userContent, scraped.images, (m) => setStatus(m, 'loading'))
-        : await requestAI(genCfg, userContent, scraped.images);
+        ? await agentSearchReply(genCfg, scraped.text, userContent, scraped.images, reportProgress, streamHooks)
+        : await requestAI(genCfg, userContent, scraped.images, streamHooks);
       previewEl.value = result.text;
       previewEl.classList.add('lsb-success');
       const imgNote = (scraped.images && scraped.images.length) ? ('（已附带 ' + scraped.images.length + ' 张图片）') : '';
       const searchNote = (cfg.enableSearch && !result.searched) ? '（⚠ 未检测到联网搜索，结果可能基于模型知识）' : '';
       const toneNote = (selectedPromptIndex > 0) ? ('（语气：' + (persona.name || '') + '）') : '';
+      appendLog('✅ 生成完成', 'done');
       setStatus('生成成功' + toneNote + imgNote + searchNote + '，可手动修改后点击「填入编辑器」', 'ok');
     } catch (e) {
+      appendLog('❌ ' + (e.message || '生成失败'), 'warn');
       setStatus(e.message || '生成失败', 'error');
     } finally {
       setGenerating(false);
@@ -2342,6 +2544,10 @@
 
     setGenerating(true);
     previewEl.classList.remove('lsb-success');
+    previewEl.value = '';
+    clearLog();
+    showLog(true);
+    logWrapEl.classList.remove('collapsed');
 
     try {
       const userContent = buildReplyUserContent(scraped.text, scraped.hasMention, {
@@ -2353,9 +2559,15 @@
       const persona = getActivePrompt();
       const replyPrompt = persona.replySystemPrompt || persona.systemPrompt || cfg.replySystemPrompt || cfg.systemPrompt;
       const replyCfg = Object.assign({}, cfg, { systemPrompt: replyPrompt });
+      appendLog(replyCfg.enableSearch ? '联网模式：多阶段搜索 + 汇总生成…' : '直接生成（未开联网，流式输出）…');
+      const streamHooks = {
+        onToken: (d) => { previewEl.value += d; previewEl.scrollTop = previewEl.scrollHeight; },
+        onReset: () => { previewEl.value = ''; },
+        onRetry: (n, max, e, wait) => reportProgress('生成失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn')
+      };
       const result = replyCfg.enableSearch
-        ? await agentSearchReply(replyCfg, scraped.text, userContent, [], (m) => setStatus(m, 'loading'))
-        : await requestAI(replyCfg, userContent, []);
+        ? await agentSearchReply(replyCfg, scraped.text, userContent, [], reportProgress, streamHooks)
+        : await requestAI(replyCfg, userContent, [], streamHooks);
       previewEl.value = result.text;
       previewEl.classList.add('lsb-success');
       // 回复目标评论，总是带 @目标评论作者 #楼层 前缀（和论坛「引用回复」按钮一致）
@@ -2363,8 +2575,10 @@
       const note = scraped.hasMention ? '（已追溯对话链，填入时会自动带 @前缀）' : '（该评论无 @，按帖子+评论生成，仍会带 @前缀）';
       const searchNote = (cfg.enableSearch && !result.searched) ? '（⚠ 未检测到联网搜索，结果可能基于模型知识）' : '';
       const toneNote = (selectedPromptIndex > 0) ? ('（语气：' + (persona.name || '') + '）') : '';
+      appendLog('✅ 生成完成', 'done');
       setStatus('回应生成成功' + toneNote + note + searchNote + '，可修改后点「填入编辑器」', 'ok');
     } catch (e) {
+      appendLog('❌ ' + (e.message || '生成失败'), 'warn');
       setStatus(e.message || '生成失败', 'error');
     } finally {
       setGenerating(false);
