@@ -1032,8 +1032,12 @@
     return { url, headers, body, isAnthropic, isChat };
   }
 
-  // 发送请求并解析，返回 { text, searched }
-  function sendRequest(req) {
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  // 可重试的失败状态码：上游临时不可用 / 限流类（401/403/400 等不重试）
+  const RETRIABLE_STATUS = [408, 429, 500, 502, 503, 504, 529];
+
+  // 单次请求并解析，返回 { text, searched }；失败时给 error 打 retriable 标记供上层判断
+  function sendRequestOnce(req) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'POST',
@@ -1059,17 +1063,35 @@
               const searched = /web_search/i.test(raw);
               resolve({ text: text.trim(), searched });
             } catch (e) {
-              reject(new Error(e.message || '响应解析失败'));
+              reject(new Error(e.message || '响应解析失败')); // 解析失败不重试
             }
           } else {
-            reject(new Error(apiErrorMessage(status, raw)));
+            const err = new Error(apiErrorMessage(status, raw));
+            err.retriable = RETRIABLE_STATUS.indexOf(status) >= 0; // 503 等临时错误可重试
+            reject(err);
           }
         },
-        onerror: () => reject(new Error('网络错误，请求未能完成，请检查网络或 Base URL')),
-        ontimeout: () => reject(new Error('请求超时（超过 180 秒），请稍后重试')),
-        onabort: () => reject(new Error('请求已取消'))
+        onerror: () => { const e = new Error('网络错误，请求未能完成，请检查网络或 Base URL'); e.retriable = true; reject(e); },
+        ontimeout: () => { const e = new Error('请求超时（超过 180 秒），请稍后重试'); e.retriable = true; reject(e); },
+        onabort: () => reject(new Error('请求已取消')) // 用户取消不重试
       });
     });
+  }
+
+  // 带自动重试的发送：仅对可重试失败（网络错误 / 超时 / 503 等）重试，最多 2 次，退避 1s→2s。
+  // 加在最底层，故每次调用各自独立重试：阶段3 某个并行子搜索失败只重试它自己，不影响兄弟、不重跑整个流程。
+  async function sendRequest(req, onRetry) {
+    const MAX_RETRY = 2;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await sendRequestOnce(req);
+      } catch (e) {
+        if (!e.retriable || attempt === MAX_RETRY) throw e;
+        const wait = 1000 * (attempt + 1); // 1s、2s
+        if (typeof onRetry === 'function') { try { onRetry(attempt + 1, MAX_RETRY, e, wait); } catch (_) { /* 忽略回调异常 */ } }
+        await delay(wait);
+      }
+    }
   }
 
   // 单次调用（联网开关打开时注入搜索工具 + 使用指导）
@@ -1132,14 +1154,14 @@
       images: undefined,
       tools: undefined
     });
-    const planRes = await sendRequest(planReq);
+    const planRes = await sendRequest(planReq, (n, max, e, wait) => progress('规划请求失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…'));
     const pairs = parsePairs(planRes.text);
 
     if (!pairs.length) {
       // 无需搜索 → 降级普通生成（不带搜索工具）
       progress('无需联网搜索，直接生成…');
       const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalUserContent, images: images, tools: undefined });
-      return sendRequest(req);
+      return sendRequest(req, (n, max, e, wait) => progress('生成请求失败，' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…'));
     }
 
     // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，结果合并）
@@ -1162,7 +1184,7 @@
         images: undefined,
         tools: searchTools(cfg)
       }));
-      const ress = await Promise.all(reqs.map(r => sendRequest(r).catch(e => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
+      const ress = await Promise.all(reqs.map(r => sendRequest(r, () => progress('部分搜索超时/失败，正在自动重试…')).catch(e => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
       ress.forEach((r, idx) => {
         searchTexts.push('【关键词：' + batch[idx].label + '】\n' + r.text);
       });
@@ -1172,7 +1194,7 @@
     progress('搜索完成，正在汇总生成回帖…');
     const finalContent = finalUserContent + '\n\n【注意】若下面的搜索结果中出现了与帖子原文名称不一致的正确写法（如产品名、会员名、品牌名等），请结合帖子整体上下文判断作者真正想表达的，并在回帖中使用正确写法，不要照搬帖子里的明显拼写错误。\n\n=== 联网搜索到的相关信息（仅供参考，可能不准确或过时）===\n\n' + searchTexts.join('\n\n');
     const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalContent, images: images, tools: undefined });
-    const r = await sendRequest(req);
+    const r = await sendRequest(req, (n, max, e, wait) => progress('汇总请求失败，' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…'));
     return { text: r.text, searched: true };
   }
 
