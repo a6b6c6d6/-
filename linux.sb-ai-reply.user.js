@@ -1756,8 +1756,22 @@
     });
 
     document.getElementById('lsb-ai-save').addEventListener('click', () => {
-      saveConfig(readConfigFromUI());
-      setStatus('设置已保存', 'ok');
+      const cfg = readConfigFromUI();
+      saveConfig(cfg);
+      // 若当前配置匹配到某个预设（按 baseUrl 识别，与激活高亮一致），把改动同步回该预设
+      const profiles = loadProfiles();
+      const idx = cfg.baseUrl ? profiles.findIndex((p) => p.baseUrl === cfg.baseUrl) : -1;
+      if (idx >= 0) {
+        const p = profiles[idx];
+        p.apiKey = cfg.apiKey;
+        p.model = cfg.model;
+        p.apiFormat = cfg.apiFormat;
+        saveProfiles(profiles); // name / models 缓存保留不动
+        refreshProfileSelect();
+        setStatus('设置已保存，并同步到预设「' + (p.name || ('预设 ' + (idx + 1))) + '」', 'ok');
+      } else {
+        setStatus('设置已保存', 'ok');
+      }
     });
 
     makeDraggable(panel, panel.querySelector('.lsb-ai-header'));
