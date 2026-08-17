@@ -251,6 +251,11 @@
     .lsb-ai-profile-row { display: flex; gap: 6px; }
     .lsb-ai-profile-row button { flex: 1; padding: 6px 10px; }
 
+    /* 模型名称 + 拉取按钮 */
+    .lsb-ai-model-row { display: flex; gap: 6px; align-items: stretch; }
+    .lsb-ai-model-row .lsb-ai-input { flex: 1; }
+    .lsb-ai-model-row button { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
+
     /* 中转站预设：自定义下拉组件 */
     .lsb-ai-profile-dd { position: relative; }
     .lsb-ai-profile-dd-trigger {
@@ -424,6 +429,74 @@
 
   function saveProfiles(list) {
     gmSet('profiles', list);
+  }
+
+  // 把模型 id 列表填进 <datalist>，供模型输入框下拉/筛选
+  function populateModelList(models) {
+    const dl = document.getElementById('lsb-ai-model-list');
+    if (!dl) return;
+    dl.innerHTML = '';
+    (Array.isArray(models) ? models : []).forEach((id) => {
+      const opt = document.createElement('option');
+      opt.value = id;
+      dl.appendChild(opt);
+    });
+  }
+
+  // 载入时用「当前激活预设（按 baseUrl 匹配）」缓存的模型列表回填 datalist
+  function populateModelListFromActiveProfile() {
+    const curBase = loadConfig().baseUrl;
+    if (!curBase) return;
+    const p = loadProfiles().find((x) => x.baseUrl === curBase);
+    if (p && Array.isArray(p.models)) populateModelList(p.models);
+  }
+
+  // 从当前 baseUrl/key 拉取模型列表（GET /models），填进 datalist，并缓存到匹配的预设
+  function fetchModels() {
+    const $ = (id) => document.getElementById('lsb-ai-cfg-' + id);
+    const baseUrl = $('baseUrl').value.trim();
+    const apiKey = $('apiKey').value.trim();
+    const apiFormat = $('apiFormat').value;
+    if (!baseUrl) { setStatus('请先填写 API Base URL 再拉取模型', 'error'); return; }
+    const btn = document.getElementById('lsb-ai-model-fetch');
+    const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '拉取'; } };
+    if (btn) { btn.disabled = true; btn.textContent = '拉取中…'; }
+    setStatus('正在拉取模型列表…', 'loading');
+    const headers = apiFormat === 'anthropic'
+      ? { 'User-Agent': CLIENT_UA, 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+      : { 'User-Agent': CLIENT_UA, 'Authorization': 'Bearer ' + apiKey };
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: joinUrl(baseUrl, 'models'),
+      timeout: 30000,
+      headers: headers,
+      onload: (resp) => {
+        restoreBtn();
+        if (resp.status < 200 || resp.status >= 300) {
+          setStatus('拉取模型失败：' + apiErrorMessage(resp.status, resp.responseText || ''), 'error');
+          return;
+        }
+        let ids = [];
+        try {
+          const d = JSON.parse(resp.responseText || '{}');
+          const arr = Array.isArray(d) ? d : (Array.isArray(d.data) ? d.data : (Array.isArray(d.models) ? d.models : []));
+          ids = arr.map((x) => (typeof x === 'string' ? x : (x && (x.id || x.name)))).filter(Boolean);
+        } catch (e) {
+          setStatus('模型列表解析失败：' + (e.message || e), 'error');
+          return;
+        }
+        if (!ids.length) { setStatus('该中转站未返回模型列表（/models 为空或格式不支持），仍可手动输入', 'error'); return; }
+        ids = Array.from(new Set(ids)).sort();
+        populateModelList(ids);
+        // 缓存到 baseUrl 匹配的预设，下次切回该预设直接有下拉
+        const profiles = loadProfiles();
+        const idx = profiles.findIndex((p) => p.baseUrl === baseUrl);
+        if (idx >= 0) { profiles[idx].models = ids; saveProfiles(profiles); }
+        setStatus('已拉取 ' + ids.length + ' 个模型，点模型框可选择/打字筛选', 'ok');
+      },
+      onerror: () => { restoreBtn(); setStatus('拉取模型失败：网络错误或 Base URL 有误', 'error'); },
+      ontimeout: () => { restoreBtn(); setStatus('拉取模型超时（30秒）', 'error'); }
+    });
   }
 
   /* ============================================================
@@ -1330,6 +1403,7 @@
     $('apiKey').value = p.apiKey || '';
     $('model').value = p.model || '';
     $('apiFormat').value = p.apiFormat || 'responses';
+    populateModelList(p.models || []); // 用该预设缓存的模型列表刷新下拉
     saveConfig(readConfigFromUI()); // 立即保存生效
     closeProfileMenu();
     refreshProfileSelect(); // 更新激活高亮 + 触发器标签
@@ -1467,7 +1541,12 @@
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">模型名称（Model）</label>
-              <input class="lsb-ai-input" id="lsb-ai-cfg-model" type="text" placeholder="gpt-4.1-mini">
+              <div class="lsb-ai-model-row">
+                <input class="lsb-ai-input" id="lsb-ai-cfg-model" type="text" list="lsb-ai-model-list" placeholder="gpt-4.1-mini" autocomplete="off">
+                <datalist id="lsb-ai-model-list"></datalist>
+                <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-model-fetch" title="从当前 Base URL / Key 拉取可用模型列表">拉取</button>
+              </div>
+              <span class="lsb-ai-hint">点「拉取」从中转站获取模型列表，之后点模型框可下拉选择/打字筛选；仍可手动输入</span>
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">请求格式</label>
@@ -1566,6 +1645,10 @@
     });
     document.getElementById('lsb-ai-profile-save').addEventListener('click', saveCurrentAsProfile);
     refreshProfileSelect();
+
+    // 模型列表：拉取按钮 + 载入时用激活预设缓存回填 datalist
+    document.getElementById('lsb-ai-model-fetch').addEventListener('click', fetchModels);
+    populateModelListFromActiveProfile();
 
     document.getElementById('lsb-ai-save').addEventListener('click', () => {
       saveConfig(readConfigFromUI());
