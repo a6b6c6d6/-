@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.6.1
+// @version      2.7.0
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -248,6 +248,123 @@
     .lsb-ai-check-row input { margin: 0; }
     .lsb-ai-number-row { display: flex; gap: 10px; }
     .lsb-ai-number-row .lsb-ai-row { flex: 1; }
+    .lsb-ai-profile-row { display: flex; gap: 6px; }
+    .lsb-ai-profile-row button { flex: 1; padding: 6px 10px; }
+
+    /* 模型名称 + 拉取按钮 + 自定义筛选下拉 */
+    .lsb-ai-model-row { display: flex; gap: 6px; align-items: stretch; }
+    .lsb-ai-model-dd { position: relative; flex: 1; display: flex; }
+    .lsb-ai-model-dd .lsb-ai-input { flex: 1; padding-right: 28px; } /* 给右侧箭头留位 */
+    .lsb-ai-model-caret {
+      position: absolute;
+      right: 1px; top: 1px; bottom: 1px;
+      width: 26px;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      color: #9ca3af;
+      font-size: 11px;
+      border-radius: 0 8px 8px 0;
+    }
+    .lsb-ai-model-caret:hover, .lsb-ai-model-dd.open .lsb-ai-model-caret { color: #2563eb; }
+    .lsb-ai-model-caret:hover { background: #f3f4f6; }
+    #lsb-ai-model-fetch { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
+    .lsb-ai-model-menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px); left: 0; right: 0;
+      z-index: 10;
+      padding: 6px;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
+    }
+    .lsb-ai-model-dd.open .lsb-ai-model-menu { display: block; }
+    .lsb-ai-model-filter { margin-bottom: 6px; padding: 6px 9px; }
+    .lsb-ai-model-list { max-height: 220px; overflow-y: auto; }
+    .lsb-ai-model-item {
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: #1f2937;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .lsb-ai-model-item:hover { background: #f3f4f6; }
+    .lsb-ai-model-item.is-active { background: #eff6ff; color: #2563eb; font-weight: 600; }
+    .lsb-ai-model-empty { padding: 8px; font-size: 12px; color: #9ca3af; text-align: center; }
+
+    /* 中转站预设：自定义下拉组件 */
+    .lsb-ai-profile-dd { position: relative; }
+    .lsb-ai-profile-dd-trigger {
+      width: 100%;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 7px 9px;
+      font-size: 13px;
+      color: #1f2937;
+      background: #fff;
+      cursor: pointer;
+      text-align: left;
+      font-family: inherit;
+    }
+    .lsb-ai-profile-dd-trigger:hover { border-color: #9ca3af; }
+    .lsb-ai-profile-dd.open .lsb-ai-profile-dd-trigger {
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, .15);
+    }
+    .lsb-ai-profile-dd-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lsb-ai-profile-dd-caret { flex-shrink: 0; color: #9ca3af; font-size: 11px; transition: transform .15s ease; }
+    .lsb-ai-profile-dd.open .lsb-ai-profile-dd-caret { transform: rotate(180deg); }
+    .lsb-ai-profile-dd-menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      z-index: 10;
+      max-height: 240px;
+      overflow-y: auto;
+      padding: 4px;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
+    }
+    .lsb-ai-profile-dd.open .lsb-ai-profile-dd-menu { display: block; }
+    .lsb-ai-profile-dd-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .lsb-ai-profile-dd-item:hover { background: #f3f4f6; }
+    .lsb-ai-profile-dd-item.is-active { background: #eff6ff; }
+    .lsb-ai-profile-dd-item.is-active .lsb-ai-profile-dd-name { color: #2563eb; font-weight: 600; }
+    .lsb-ai-profile-dd-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+    .lsb-ai-profile-dd-empty { padding: 8px; font-size: 12px; color: #9ca3af; text-align: center; }
+    .lsb-ai-profile-dd-actions { display: flex; gap: 2px; flex-shrink: 0; }
+    .lsb-ai-profile-dd-act {
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      line-height: 1.4;
+      color: #6b7280;
+    }
+    .lsb-ai-profile-dd-act:hover { background: #e5e7eb; color: #1f2937; }
+    .lsb-ai-profile-dd-act[data-act="del"]:hover { background: #fee2e2; color: #dc2626; }
 
     /* 每条评论旁注入的「水它」按钮 */
     .lsb-water-btn {
@@ -341,6 +458,113 @@
     for (const key of Object.keys(DEFAULTS)) {
       gmSet(key, cfg[key]);
     }
+  }
+
+  // 中转站预设：数组 [{ name, baseUrl, apiKey, model, apiFormat }]
+  function loadProfiles() {
+    const v = gmGet('profiles', []);
+    return Array.isArray(v) ? v : [];
+  }
+
+  function saveProfiles(list) {
+    gmSet('profiles', list);
+  }
+
+  // 已拉取的模型 id 列表（内存），供自定义筛选下拉渲染
+  let modelOptions = [];
+
+  // 按筛选词渲染模型下拉菜单条目（筛选框与主输入框独立，互不干扰）
+  function renderModelMenu(filterText) {
+    const box = document.getElementById('lsb-ai-model-list-box');
+    if (!box) return;
+    const curEl = document.getElementById('lsb-ai-cfg-model');
+    const cur = curEl ? curEl.value.trim() : '';
+    const f = (filterText || '').trim().toLowerCase();
+    box.innerHTML = '';
+    if (!modelOptions.length) {
+      const e = document.createElement('div');
+      e.className = 'lsb-ai-model-empty';
+      e.textContent = '尚未拉取模型，点右侧「拉取」';
+      box.appendChild(e);
+      return;
+    }
+    const list = f ? modelOptions.filter((m) => m.toLowerCase().indexOf(f) >= 0) : modelOptions;
+    if (!list.length) {
+      const e = document.createElement('div');
+      e.className = 'lsb-ai-model-empty';
+      e.textContent = '无匹配模型';
+      box.appendChild(e);
+      return;
+    }
+    list.forEach((m) => {
+      const item = document.createElement('div');
+      item.className = 'lsb-ai-model-item' + (m === cur ? ' is-active' : '');
+      item.textContent = m;
+      item.dataset.model = m;
+      box.appendChild(item);
+    });
+  }
+
+  // 更新模型下拉的数据源并重渲染
+  function populateModelList(models) {
+    modelOptions = Array.isArray(models) ? models : [];
+    renderModelMenu('');
+  }
+
+  // 载入时用「当前激活预设（按 baseUrl 匹配）」缓存的模型列表回填下拉
+  function populateModelListFromActiveProfile() {
+    const curBase = loadConfig().baseUrl;
+    if (!curBase) return;
+    const p = loadProfiles().find((x) => x.baseUrl === curBase);
+    if (p && Array.isArray(p.models)) populateModelList(p.models);
+  }
+
+  // 从当前 baseUrl/key 拉取模型列表（GET /models），填进下拉，并缓存到匹配的预设
+  function fetchModels() {
+    const $ = (id) => document.getElementById('lsb-ai-cfg-' + id);
+    const baseUrl = $('baseUrl').value.trim();
+    const apiKey = $('apiKey').value.trim();
+    const apiFormat = $('apiFormat').value;
+    if (!baseUrl) { setStatus('请先填写 API Base URL 再拉取模型', 'error'); return; }
+    const btn = document.getElementById('lsb-ai-model-fetch');
+    const restoreBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '拉取'; } };
+    if (btn) { btn.disabled = true; btn.textContent = '拉取中…'; }
+    setStatus('正在拉取模型列表…', 'loading');
+    const headers = apiFormat === 'anthropic'
+      ? { 'User-Agent': CLIENT_UA, 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+      : { 'User-Agent': CLIENT_UA, 'Authorization': 'Bearer ' + apiKey };
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: joinUrl(baseUrl, 'models'),
+      timeout: 30000,
+      headers: headers,
+      onload: (resp) => {
+        restoreBtn();
+        if (resp.status < 200 || resp.status >= 300) {
+          setStatus('拉取模型失败：' + apiErrorMessage(resp.status, resp.responseText || ''), 'error');
+          return;
+        }
+        let ids = [];
+        try {
+          const d = JSON.parse(resp.responseText || '{}');
+          const arr = Array.isArray(d) ? d : (Array.isArray(d.data) ? d.data : (Array.isArray(d.models) ? d.models : []));
+          ids = arr.map((x) => (typeof x === 'string' ? x : (x && (x.id || x.name)))).filter(Boolean);
+        } catch (e) {
+          setStatus('模型列表解析失败：' + (e.message || e), 'error');
+          return;
+        }
+        if (!ids.length) { setStatus('该中转站未返回模型列表（/models 为空或格式不支持），仍可手动输入', 'error'); return; }
+        ids = Array.from(new Set(ids)).sort();
+        populateModelList(ids);
+        // 缓存到 baseUrl 匹配的预设，下次切回该预设直接有下拉
+        const profiles = loadProfiles();
+        const idx = profiles.findIndex((p) => p.baseUrl === baseUrl);
+        if (idx >= 0) { profiles[idx].models = ids; saveProfiles(profiles); }
+        setStatus('已拉取 ' + ids.length + ' 个模型，点右侧 ▾ 展开选择/筛选', 'ok');
+      },
+      onerror: () => { restoreBtn(); setStatus('拉取模型失败：网络错误或 Base URL 有误', 'error'); },
+      ontimeout: () => { restoreBtn(); setStatus('拉取模型超时（30秒）', 'error'); }
+    });
   }
 
   /* ============================================================
@@ -910,6 +1134,9 @@
     return [{ type: 'web_search' }];
   }
 
+  // 客户端 UA 伪装（AgentRouter 等中转站按 UA 白名单放行，实测 Cline/ 前缀可用，版本号任意）
+  const CLIENT_UA = 'Cline/3.0.0';
+
   // 构造三格式请求（url/headers/body），opts: { system, userContent, images, tools }
   function buildRequest(cfg, opts) {
     const isAnthropic = cfg.apiFormat === 'anthropic';
@@ -920,7 +1147,7 @@
 
     if (isAnthropic) {
       url = joinUrl(cfg.baseUrl, 'messages');
-      headers = { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' };
+      headers = Object.assign({}, { 'User-Agent': CLIENT_UA }, { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' });
       const content = useImages
         ? [{ type: 'text', text: opts.userContent }].concat(opts.images.map(u => ({ type: 'image', source: { type: 'url', url: u } })))
         : opts.userContent;
@@ -928,7 +1155,7 @@
       if (opts.tools) body.tools = opts.tools;
     } else if (isChat) {
       url = joinUrl(cfg.baseUrl, 'chat/completions');
-      headers = { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' };
+      headers = Object.assign({}, { 'User-Agent': CLIENT_UA }, { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' });
       const content = useImages
         ? [{ type: 'text', text: opts.userContent }].concat(opts.images.map(u => ({ type: 'image_url', image_url: { url: u } })))
         : opts.userContent;
@@ -936,7 +1163,7 @@
       if (opts.tools) body.tools = opts.tools;
     } else {
       url = joinUrl(cfg.baseUrl, 'responses');
-      headers = { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' };
+      headers = Object.assign({}, { 'User-Agent': CLIENT_UA }, { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' });
       const content = useImages
         ? [{ type: 'input_text', text: opts.userContent }].concat(opts.images.map(u => ({ type: 'input_image', image_url: u })))
         : opts.userContent;
@@ -946,8 +1173,12 @@
     return { url, headers, body, isAnthropic, isChat };
   }
 
-  // 发送请求并解析，返回 { text, searched }
-  function sendRequest(req) {
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  // 可重试的失败状态码：上游临时不可用 / 限流类（401/403/400 等不重试）
+  const RETRIABLE_STATUS = [408, 429, 500, 502, 503, 504, 529];
+
+  // 单次请求并解析，返回 { text, searched }；失败时给 error 打 retriable 标记供上层判断
+  function sendRequestOnce(req) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'POST',
@@ -973,17 +1204,35 @@
               const searched = /web_search/i.test(raw);
               resolve({ text: text.trim(), searched });
             } catch (e) {
-              reject(new Error(e.message || '响应解析失败'));
+              reject(new Error(e.message || '响应解析失败')); // 解析失败不重试
             }
           } else {
-            reject(new Error(apiErrorMessage(status, raw)));
+            const err = new Error(apiErrorMessage(status, raw));
+            err.retriable = RETRIABLE_STATUS.indexOf(status) >= 0; // 503 等临时错误可重试
+            reject(err);
           }
         },
-        onerror: () => reject(new Error('网络错误，请求未能完成，请检查网络或 Base URL')),
-        ontimeout: () => reject(new Error('请求超时（超过 180 秒），请稍后重试')),
-        onabort: () => reject(new Error('请求已取消'))
+        onerror: () => { const e = new Error('网络错误，请求未能完成，请检查网络或 Base URL'); e.retriable = true; reject(e); },
+        ontimeout: () => { const e = new Error('请求超时（超过 180 秒），请稍后重试'); e.retriable = true; reject(e); },
+        onabort: () => reject(new Error('请求已取消')) // 用户取消不重试
       });
     });
+  }
+
+  // 带自动重试的发送：仅对可重试失败（网络错误 / 超时 / 503 等）重试，最多 2 次，退避 1s→2s。
+  // 加在最底层，故每次调用各自独立重试：阶段3 某个并行子搜索失败只重试它自己，不影响兄弟、不重跑整个流程。
+  async function sendRequest(req, onRetry) {
+    const MAX_RETRY = 2;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await sendRequestOnce(req);
+      } catch (e) {
+        if (!e.retriable || attempt === MAX_RETRY) throw e;
+        const wait = 1000 * (attempt + 1); // 1s、2s
+        if (typeof onRetry === 'function') { try { onRetry(attempt + 1, MAX_RETRY, e, wait); } catch (_) { /* 忽略回调异常 */ } }
+        await delay(wait);
+      }
+    }
   }
 
   // 单次调用（联网开关打开时注入搜索工具 + 使用指导）
@@ -1046,14 +1295,14 @@
       images: undefined,
       tools: undefined
     });
-    const planRes = await sendRequest(planReq);
+    const planRes = await sendRequest(planReq, (n, max, e, wait) => progress('规划请求失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…'));
     const pairs = parsePairs(planRes.text);
 
     if (!pairs.length) {
       // 无需搜索 → 降级普通生成（不带搜索工具）
       progress('无需联网搜索，直接生成…');
       const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalUserContent, images: images, tools: undefined });
-      return sendRequest(req);
+      return sendRequest(req, (n, max, e, wait) => progress('生成请求失败，' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…'));
     }
 
     // 阶段3：分批并行双搜（每个关键词对搜 kw 精确词 + fallback 泛化词，结果合并）
@@ -1076,7 +1325,7 @@
         images: undefined,
         tools: searchTools(cfg)
       }));
-      const ress = await Promise.all(reqs.map(r => sendRequest(r).catch(e => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
+      const ress = await Promise.all(reqs.map(r => sendRequest(r, () => progress('部分搜索超时/失败，正在自动重试…')).catch(e => ({ text: '(搜索失败：' + (e.message || e) + ')', searched: false }))));
       ress.forEach((r, idx) => {
         searchTexts.push('【关键词：' + batch[idx].label + '】\n' + r.text);
       });
@@ -1086,7 +1335,7 @@
     progress('搜索完成，正在汇总生成回帖…');
     const finalContent = finalUserContent + '\n\n【注意】若下面的搜索结果中出现了与帖子原文名称不一致的正确写法（如产品名、会员名、品牌名等），请结合帖子整体上下文判断作者真正想表达的，并在回帖中使用正确写法，不要照搬帖子里的明显拼写错误。\n\n=== 联网搜索到的相关信息（仅供参考，可能不准确或过时）===\n\n' + searchTexts.join('\n\n');
     const req = buildRequest(cfg, { system: cfg.systemPrompt, userContent: finalContent, images: images, tools: undefined });
-    const r = await sendRequest(req);
+    const r = await sendRequest(req, (n, max, e, wait) => progress('汇总请求失败，' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…'));
     return { text: r.text, searched: true };
   }
 
@@ -1156,6 +1405,135 @@
     $('enableSearch').checked = !!cfg.enableSearch;
   }
 
+  // ===== 中转站预设 =====
+  function closeProfileMenu() {
+    const dd = document.getElementById('lsb-ai-profile-dd');
+    if (dd) dd.classList.remove('open');
+  }
+
+  // 渲染自定义下拉：触发器标签 + 菜单项（每项自带重命名/删除），并按 baseUrl 自动识别激活项
+  function refreshProfileSelect() {
+    const menu = document.getElementById('lsb-ai-profile-menu');
+    const cur = document.getElementById('lsb-ai-profile-current');
+    if (!menu || !cur) return;
+    const profiles = loadProfiles();
+    const curBase = loadConfig().baseUrl; // 当前已保存的 baseUrl，用于自动识别激活的预设
+    let matched = -1;
+    profiles.forEach((p, i) => { if (curBase && p.baseUrl === curBase && matched < 0) matched = i; });
+
+    // 触发器标签：激活预设名 / 有预设未匹配 / 无预设
+    if (!profiles.length) cur.textContent = '（暂无预设）';
+    else if (matched >= 0) cur.textContent = profiles[matched].name || ('预设 ' + (matched + 1));
+    else cur.textContent = '（选择预设切换）';
+
+    // 菜单项（用 createElement 避免预设名注入）
+    menu.innerHTML = '';
+    if (!profiles.length) {
+      const empty = document.createElement('div');
+      empty.className = 'lsb-ai-profile-dd-empty';
+      empty.textContent = '暂无预设，填好配置后点「存为当前预设」';
+      menu.appendChild(empty);
+      return;
+    }
+    profiles.forEach((p, i) => {
+      const item = document.createElement('div');
+      item.className = 'lsb-ai-profile-dd-item' + (i === matched ? ' is-active' : '');
+      item.dataset.idx = String(i);
+
+      const name = document.createElement('span');
+      name.className = 'lsb-ai-profile-dd-name';
+      name.textContent = p.name || ('预设 ' + (i + 1));
+      item.appendChild(name);
+
+      const actions = document.createElement('span');
+      actions.className = 'lsb-ai-profile-dd-actions';
+      [['rename', '✎', '重命名'], ['del', '✕', '删除']].forEach(([act, icon, tip]) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'lsb-ai-profile-dd-act';
+        btn.dataset.act = act;
+        btn.dataset.idx = String(i);
+        btn.title = tip;
+        btn.textContent = icon;
+        actions.appendChild(btn);
+      });
+      item.appendChild(actions);
+      menu.appendChild(item);
+    });
+  }
+
+  function switchProfile(index) {
+    const profiles = loadProfiles();
+    const p = profiles[index];
+    if (!p) return;
+    const $ = (id) => document.getElementById('lsb-ai-cfg-' + id);
+    $('baseUrl').value = p.baseUrl || '';
+    $('apiKey').value = p.apiKey || '';
+    $('model').value = p.model || '';
+    $('apiFormat').value = p.apiFormat || 'responses';
+    populateModelList(p.models || []); // 用该预设缓存的模型列表刷新下拉
+    saveConfig(readConfigFromUI()); // 立即保存生效
+    closeProfileMenu();
+    refreshProfileSelect(); // 更新激活高亮 + 触发器标签
+    setStatus('已切换到预设「' + (p.name || ('预设 ' + (index + 1))) + '」', 'ok');
+  }
+
+  function saveCurrentAsProfile() {
+    const $ = (id) => document.getElementById('lsb-ai-cfg-' + id);
+    const baseUrl = $('baseUrl').value.trim();
+    if (!baseUrl) {
+      setStatus('请先填写 API Base URL 再保存预设', 'error');
+      return;
+    }
+    let name = baseUrl;
+    try { name = new URL(baseUrl).hostname; } catch (e) { /* 用原始 baseUrl */ }
+    // 弹窗让用户确认/修改预设名（取消则不保存）
+    try {
+      const input = prompt('预设名称：', name);
+      if (input === null) return;
+      if (input.trim()) name = input.trim();
+    } catch (e) { /* prompt 不可用则用默认域名 */ }
+    const profiles = loadProfiles();
+    profiles.push({
+      name: name,
+      baseUrl: baseUrl,
+      apiKey: $('apiKey').value.trim(),
+      model: $('model').value.trim(),
+      apiFormat: $('apiFormat').value
+    });
+    saveProfiles(profiles);
+    refreshProfileSelect();
+    setStatus('已保存预设「' + name + '」', 'ok');
+  }
+
+  function renameCurrentProfile(index) {
+    const profiles = loadProfiles();
+    const p = profiles[index];
+    if (!p) return;
+    try {
+      const input = prompt('新名称：', p.name || '');
+      if (input === null) return;
+      if (input.trim()) p.name = input.trim();
+    } catch (e) { return; }
+    saveProfiles(profiles);
+    refreshProfileSelect();
+    setStatus('已重命名为「' + p.name + '」', 'ok');
+  }
+
+  function deleteCurrentProfile(index) {
+    const profiles = loadProfiles();
+    const p = profiles[index];
+    if (!p) return;
+    const label = p.name || ('预设 ' + (index + 1));
+    try {
+      if (!confirm('删除预设「' + label + '」？')) return;
+    } catch (e) { /* confirm 不可用则直接删 */ }
+    profiles.splice(index, 1);
+    saveProfiles(profiles);
+    refreshProfileSelect();
+    setStatus('已删除预设「' + label + '」', 'ok');
+  }
+
   function validateConfig(cfg) {
     if (!cfg.baseUrl) return '请先在设置中填写 API Base URL';
     if (!cfg.apiKey) return '请先在设置中填写 API Key';
@@ -1208,6 +1586,20 @@
           <summary>设置</summary>
           <div class="lsb-ai-settings-content">
             <div class="lsb-ai-row">
+              <label class="lsb-ai-label">中转站预设</label>
+              <div class="lsb-ai-profile-dd" id="lsb-ai-profile-dd">
+                <button type="button" class="lsb-ai-profile-dd-trigger" id="lsb-ai-profile-trigger">
+                  <span class="lsb-ai-profile-dd-current" id="lsb-ai-profile-current">（暂无预设）</span>
+                  <span class="lsb-ai-profile-dd-caret">▾</span>
+                </button>
+                <div class="lsb-ai-profile-dd-menu" id="lsb-ai-profile-menu"></div>
+              </div>
+              <div class="lsb-ai-profile-row">
+                <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-profile-save">存为当前预设</button>
+              </div>
+              <span class="lsb-ai-hint">点预设名切换（自动填充并保存生效）；每条预设右侧可重命名 ✎ / 删除 ✕</span>
+            </div>
+            <div class="lsb-ai-row">
               <label class="lsb-ai-label">API Base URL（例如 https://api.openai.com/v1）</label>
               <input class="lsb-ai-input" id="lsb-ai-cfg-baseUrl" type="text" placeholder="https://api.openai.com/v1">
             </div>
@@ -1217,7 +1609,18 @@
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">模型名称（Model）</label>
-              <input class="lsb-ai-input" id="lsb-ai-cfg-model" type="text" placeholder="gpt-4.1-mini">
+              <div class="lsb-ai-model-row">
+                <div class="lsb-ai-model-dd" id="lsb-ai-model-dd">
+                  <input class="lsb-ai-input" id="lsb-ai-cfg-model" type="text" placeholder="gpt-4.1-mini" autocomplete="off">
+                  <button type="button" class="lsb-ai-model-caret" id="lsb-ai-model-caret" tabindex="-1" title="展开模型列表">▾</button>
+                  <div class="lsb-ai-model-menu" id="lsb-ai-model-menu">
+                    <input class="lsb-ai-input lsb-ai-model-filter" id="lsb-ai-model-filter" type="text" placeholder="🔍 筛选模型…" autocomplete="off">
+                    <div class="lsb-ai-model-list" id="lsb-ai-model-list-box"></div>
+                  </div>
+                </div>
+                <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-model-fetch" title="从当前 Base URL / Key 拉取可用模型列表">拉取</button>
+              </div>
+              <span class="lsb-ai-hint">点「拉取」获取模型列表 → 点右侧 ▾ 展开、上方小框筛选、点一条即选中；模型框本身仍可手动输入</span>
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">请求格式</label>
@@ -1287,9 +1690,88 @@
     document.getElementById('lsb-ai-target-clear').addEventListener('click', clearTarget);
     document.getElementById('lsb-ai-fill').addEventListener('click', onFill);
 
+    // 中转站预设：自定义下拉（切换 / 重命名 / 删除 / 存为）
+    const profileDd = document.getElementById('lsb-ai-profile-dd');
+    const profileMenu = document.getElementById('lsb-ai-profile-menu');
+    document.getElementById('lsb-ai-profile-trigger').addEventListener('click', (e) => {
+      e.stopPropagation();
+      profileDd.classList.toggle('open');
+    });
+    profileMenu.addEventListener('click', (e) => {
+      const actBtn = e.target.closest('.lsb-ai-profile-dd-act');
+      if (actBtn) {
+        e.stopPropagation(); // 操作图标不触发切换
+        const idx = parseInt(actBtn.dataset.idx, 10);
+        if (isNaN(idx)) return;
+        if (actBtn.dataset.act === 'rename') renameCurrentProfile(idx);
+        else if (actBtn.dataset.act === 'del') deleteCurrentProfile(idx);
+        return;
+      }
+      const item = e.target.closest('.lsb-ai-profile-dd-item');
+      if (item) {
+        const idx = parseInt(item.dataset.idx, 10);
+        if (!isNaN(idx)) switchProfile(idx);
+      }
+    });
+    // 点击组件外部关闭菜单
+    document.addEventListener('click', (e) => {
+      if (profileDd && !profileDd.contains(e.target)) profileDd.classList.remove('open');
+    });
+    document.getElementById('lsb-ai-profile-save').addEventListener('click', saveCurrentAsProfile);
+    refreshProfileSelect();
+
+    // 模型列表：拉取按钮 + 载入时用激活预设缓存回填
+    document.getElementById('lsb-ai-model-fetch').addEventListener('click', fetchModels);
+    populateModelListFromActiveProfile();
+
+    // 模型自定义筛选下拉：▾ 展开 / 独立筛选框 / 点条目选中（筛选框与主输入框功能不重合）
+    const modelDd = document.getElementById('lsb-ai-model-dd');
+    const modelInput = document.getElementById('lsb-ai-cfg-model');
+    const modelFilter = document.getElementById('lsb-ai-model-filter');
+    const modelListBox = document.getElementById('lsb-ai-model-list-box');
+    const openModelMenu = () => {
+      if (modelFilter) modelFilter.value = '';
+      renderModelMenu('');
+      modelDd.classList.add('open');
+      if (modelFilter) setTimeout(() => modelFilter.focus(), 0);
+    };
+    const closeModelMenu = () => modelDd.classList.remove('open');
+    document.getElementById('lsb-ai-model-caret').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (modelDd.classList.contains('open')) closeModelMenu();
+      else openModelMenu();
+    });
+    modelFilter.addEventListener('input', () => renderModelMenu(modelFilter.value));
+    modelListBox.addEventListener('click', (e) => {
+      const item = e.target.closest('.lsb-ai-model-item');
+      if (!item) return;
+      modelInput.value = item.dataset.model;
+      saveConfig(readConfigFromUI()); // 选中即生效
+      closeModelMenu();
+      setStatus('已选择模型「' + item.dataset.model + '」', 'ok');
+    });
+    // 点击组件外部关闭模型菜单
+    document.addEventListener('click', (e) => {
+      if (modelDd && !modelDd.contains(e.target)) closeModelMenu();
+    });
+
     document.getElementById('lsb-ai-save').addEventListener('click', () => {
-      saveConfig(readConfigFromUI());
-      setStatus('设置已保存', 'ok');
+      const cfg = readConfigFromUI();
+      saveConfig(cfg);
+      // 若当前配置匹配到某个预设（按 baseUrl 识别，与激活高亮一致），把改动同步回该预设
+      const profiles = loadProfiles();
+      const idx = cfg.baseUrl ? profiles.findIndex((p) => p.baseUrl === cfg.baseUrl) : -1;
+      if (idx >= 0) {
+        const p = profiles[idx];
+        p.apiKey = cfg.apiKey;
+        p.model = cfg.model;
+        p.apiFormat = cfg.apiFormat;
+        saveProfiles(profiles); // name / models 缓存保留不动
+        refreshProfileSelect();
+        setStatus('设置已保存，并同步到预设「' + (p.name || ('预设 ' + (idx + 1))) + '」', 'ok');
+      } else {
+        setStatus('设置已保存', 'ok');
+      }
     });
 
     makeDraggable(panel, panel.querySelector('.lsb-ai-header'));
