@@ -251,10 +251,10 @@
     .lsb-ai-profile-row { display: flex; gap: 6px; }
     .lsb-ai-profile-row button { flex: 1; padding: 6px 10px; }
 
-    /* 模型名称 + 拉取按钮 */
+    /* 模型名称 + 拉取按钮 + 自定义筛选下拉 */
     .lsb-ai-model-row { display: flex; gap: 6px; align-items: stretch; }
-    .lsb-ai-model-input-wrap { position: relative; flex: 1; display: flex; }
-    .lsb-ai-model-input-wrap .lsb-ai-input { flex: 1; padding-right: 28px; } /* 给右侧箭头留位 */
+    .lsb-ai-model-dd { position: relative; flex: 1; display: flex; }
+    .lsb-ai-model-dd .lsb-ai-input { flex: 1; padding-right: 28px; } /* 给右侧箭头留位 */
     .lsb-ai-model-caret {
       position: absolute;
       right: 1px; top: 1px; bottom: 1px;
@@ -266,8 +266,34 @@
       font-size: 11px;
       border-radius: 0 8px 8px 0;
     }
-    .lsb-ai-model-caret:hover { color: #2563eb; background: #f3f4f6; }
+    .lsb-ai-model-caret:hover, .lsb-ai-model-dd.open .lsb-ai-model-caret { color: #2563eb; }
+    .lsb-ai-model-caret:hover { background: #f3f4f6; }
     #lsb-ai-model-fetch { flex: 0 0 auto; padding: 7px 12px; white-space: nowrap; }
+    .lsb-ai-model-menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px); left: 0; right: 0;
+      z-index: 10;
+      padding: 6px;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
+    }
+    .lsb-ai-model-dd.open .lsb-ai-model-menu { display: block; }
+    .lsb-ai-model-filter { margin-bottom: 6px; padding: 6px 9px; }
+    .lsb-ai-model-list { max-height: 220px; overflow-y: auto; }
+    .lsb-ai-model-item {
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: #1f2937;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .lsb-ai-model-item:hover { background: #f3f4f6; }
+    .lsb-ai-model-item.is-active { background: #eff6ff; color: #2563eb; font-weight: 600; }
+    .lsb-ai-model-empty { padding: 8px; font-size: 12px; color: #9ca3af; text-align: center; }
 
     /* 中转站预设：自定义下拉组件 */
     .lsb-ai-profile-dd { position: relative; }
@@ -444,19 +470,48 @@
     gmSet('profiles', list);
   }
 
-  // 把模型 id 列表填进 <datalist>，供模型输入框下拉/筛选
-  function populateModelList(models) {
-    const dl = document.getElementById('lsb-ai-model-list');
-    if (!dl) return;
-    dl.innerHTML = '';
-    (Array.isArray(models) ? models : []).forEach((id) => {
-      const opt = document.createElement('option');
-      opt.value = id;
-      dl.appendChild(opt);
+  // 已拉取的模型 id 列表（内存），供自定义筛选下拉渲染
+  let modelOptions = [];
+
+  // 按筛选词渲染模型下拉菜单条目（筛选框与主输入框独立，互不干扰）
+  function renderModelMenu(filterText) {
+    const box = document.getElementById('lsb-ai-model-list-box');
+    if (!box) return;
+    const curEl = document.getElementById('lsb-ai-cfg-model');
+    const cur = curEl ? curEl.value.trim() : '';
+    const f = (filterText || '').trim().toLowerCase();
+    box.innerHTML = '';
+    if (!modelOptions.length) {
+      const e = document.createElement('div');
+      e.className = 'lsb-ai-model-empty';
+      e.textContent = '尚未拉取模型，点右侧「拉取」';
+      box.appendChild(e);
+      return;
+    }
+    const list = f ? modelOptions.filter((m) => m.toLowerCase().indexOf(f) >= 0) : modelOptions;
+    if (!list.length) {
+      const e = document.createElement('div');
+      e.className = 'lsb-ai-model-empty';
+      e.textContent = '无匹配模型';
+      box.appendChild(e);
+      return;
+    }
+    list.forEach((m) => {
+      const item = document.createElement('div');
+      item.className = 'lsb-ai-model-item' + (m === cur ? ' is-active' : '');
+      item.textContent = m;
+      item.dataset.model = m;
+      box.appendChild(item);
     });
   }
 
-  // 载入时用「当前激活预设（按 baseUrl 匹配）」缓存的模型列表回填 datalist
+  // 更新模型下拉的数据源并重渲染
+  function populateModelList(models) {
+    modelOptions = Array.isArray(models) ? models : [];
+    renderModelMenu('');
+  }
+
+  // 载入时用「当前激活预设（按 baseUrl 匹配）」缓存的模型列表回填下拉
   function populateModelListFromActiveProfile() {
     const curBase = loadConfig().baseUrl;
     if (!curBase) return;
@@ -464,7 +519,7 @@
     if (p && Array.isArray(p.models)) populateModelList(p.models);
   }
 
-  // 从当前 baseUrl/key 拉取模型列表（GET /models），填进 datalist，并缓存到匹配的预设
+  // 从当前 baseUrl/key 拉取模型列表（GET /models），填进下拉，并缓存到匹配的预设
   function fetchModels() {
     const $ = (id) => document.getElementById('lsb-ai-cfg-' + id);
     const baseUrl = $('baseUrl').value.trim();
@@ -505,7 +560,7 @@
         const profiles = loadProfiles();
         const idx = profiles.findIndex((p) => p.baseUrl === baseUrl);
         if (idx >= 0) { profiles[idx].models = ids; saveProfiles(profiles); }
-        setStatus('已拉取 ' + ids.length + ' 个模型，点模型框可选择/打字筛选', 'ok');
+        setStatus('已拉取 ' + ids.length + ' 个模型，点右侧 ▾ 展开选择/筛选', 'ok');
       },
       onerror: () => { restoreBtn(); setStatus('拉取模型失败：网络错误或 Base URL 有误', 'error'); },
       ontimeout: () => { restoreBtn(); setStatus('拉取模型超时（30秒）', 'error'); }
@@ -1555,14 +1610,17 @@
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">模型名称（Model）</label>
               <div class="lsb-ai-model-row">
-                <div class="lsb-ai-model-input-wrap">
-                  <input class="lsb-ai-input" id="lsb-ai-cfg-model" type="text" list="lsb-ai-model-list" placeholder="gpt-4.1-mini" autocomplete="off">
+                <div class="lsb-ai-model-dd" id="lsb-ai-model-dd">
+                  <input class="lsb-ai-input" id="lsb-ai-cfg-model" type="text" placeholder="gpt-4.1-mini" autocomplete="off">
                   <button type="button" class="lsb-ai-model-caret" id="lsb-ai-model-caret" tabindex="-1" title="展开模型列表">▾</button>
+                  <div class="lsb-ai-model-menu" id="lsb-ai-model-menu">
+                    <input class="lsb-ai-input lsb-ai-model-filter" id="lsb-ai-model-filter" type="text" placeholder="🔍 筛选模型…" autocomplete="off">
+                    <div class="lsb-ai-model-list" id="lsb-ai-model-list-box"></div>
+                  </div>
                 </div>
-                <datalist id="lsb-ai-model-list"></datalist>
                 <button type="button" class="lsb-ai-btn lsb-ai-btn-secondary" id="lsb-ai-model-fetch" title="从当前 Base URL / Key 拉取可用模型列表">拉取</button>
               </div>
-              <span class="lsb-ai-hint">点「拉取」从中转站获取模型列表，之后点模型框可下拉选择/打字筛选；仍可手动输入</span>
+              <span class="lsb-ai-hint">点「拉取」获取模型列表 → 点右侧 ▾ 展开、上方小框筛选、点一条即选中；模型框本身仍可手动输入</span>
             </div>
             <div class="lsb-ai-row">
               <label class="lsb-ai-label">请求格式</label>
@@ -1662,18 +1720,39 @@
     document.getElementById('lsb-ai-profile-save').addEventListener('click', saveCurrentAsProfile);
     refreshProfileSelect();
 
-    // 模型列表：拉取按钮 + 载入时用激活预设缓存回填 datalist
+    // 模型列表：拉取按钮 + 载入时用激活预设缓存回填
     document.getElementById('lsb-ai-model-fetch').addEventListener('click', fetchModels);
     populateModelListFromActiveProfile();
 
-    // 模型框右侧下箭头：点一下展开 datalist 建议（原生 datalist 无可见箭头，手动补一个）
+    // 模型自定义筛选下拉：▾ 展开 / 独立筛选框 / 点条目选中（筛选框与主输入框功能不重合）
+    const modelDd = document.getElementById('lsb-ai-model-dd');
     const modelInput = document.getElementById('lsb-ai-cfg-model');
-    document.getElementById('lsb-ai-model-caret').addEventListener('click', () => {
-      modelInput.focus();
-      try {
-        modelInput.select(); // 选中现有值，方便直接打字覆盖筛选
-        if (typeof modelInput.showPicker === 'function') modelInput.showPicker(); // Chrome 121+ 支持 datalist
-      } catch (e) { /* 不支持/被拦截则仅聚焦，靠输入触发建议 */ }
+    const modelFilter = document.getElementById('lsb-ai-model-filter');
+    const modelListBox = document.getElementById('lsb-ai-model-list-box');
+    const openModelMenu = () => {
+      if (modelFilter) modelFilter.value = '';
+      renderModelMenu('');
+      modelDd.classList.add('open');
+      if (modelFilter) setTimeout(() => modelFilter.focus(), 0);
+    };
+    const closeModelMenu = () => modelDd.classList.remove('open');
+    document.getElementById('lsb-ai-model-caret').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (modelDd.classList.contains('open')) closeModelMenu();
+      else openModelMenu();
+    });
+    modelFilter.addEventListener('input', () => renderModelMenu(modelFilter.value));
+    modelListBox.addEventListener('click', (e) => {
+      const item = e.target.closest('.lsb-ai-model-item');
+      if (!item) return;
+      modelInput.value = item.dataset.model;
+      saveConfig(readConfigFromUI()); // 选中即生效
+      closeModelMenu();
+      setStatus('已选择模型「' + item.dataset.model + '」', 'ok');
+    });
+    // 点击组件外部关闭模型菜单
+    document.addEventListener('click', (e) => {
+      if (modelDd && !modelDd.contains(e.target)) closeModelMenu();
     });
 
     document.getElementById('lsb-ai-save').addEventListener('click', () => {
