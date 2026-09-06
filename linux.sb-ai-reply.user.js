@@ -2984,17 +2984,23 @@
       const stanceSel = document.getElementById('lsb-ai-vote-stance');
       const forced = stanceSel ? stanceSel.value : 'auto';
       const userContent = '下面是论坛帖子内容，请判断它是否值得加精，并严格按系统要求只输出 JSON。\n\n' + scraped.text;
-      const voteCfg = Object.assign({}, cfg, { systemPrompt: VOTE_SYSTEM_PROMPT, enableSearch: false });
-      const req = buildRequest(voteCfg, { system: VOTE_SYSTEM_PROMPT, userContent: userContent, images: undefined, tools: undefined });
-      const r = await sendRequest(req, (n, max, e, wait) =>
-        reportProgress('生成失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn'));
+      // enableSearch 尊重设置开关：开联网时投票也走「规划→按需搜索→汇总」编排，
+      // 可查证帖内时效/事实类声明（如"某软件最新版是 X"）；多数申精帖规划后无需搜索会自动降级直接生成
+      const voteCfg = Object.assign({}, cfg, { systemPrompt: VOTE_SYSTEM_PROMPT });
+      appendLog(voteCfg.enableSearch ? '联网模式：多阶段搜索 + 汇总生成评议…' : '直接生成（未开联网）…');
+      const r = voteCfg.enableSearch
+        // 不传流式 hooks：投票需整体拿 JSON 再解析，逐字流会把 JSON 半成品蹦进预览区
+        ? await agentSearchReply(voteCfg, scraped.text, userContent, [], reportProgress, {})
+        : await sendRequest(buildRequest(voteCfg, { system: VOTE_SYSTEM_PROMPT, userContent: userContent, images: undefined, tools: undefined }), (n, max, e, wait) =>
+            reportProgress('生成失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn'));
       const decision = parseVoteDecision(r.text, forced === 'auto' ? null : forced);
       if (!decision.reason) throw new Error('模型未返回有效投票理由，请重试');
       lastVoteDecision = decision;
       previewEl.value = decision.reason;
       previewEl.classList.add('lsb-success');
+      const searchNote = (voteCfg.enableSearch && !r.searched) ? '（未检测到联网搜索，结果可能基于模型知识）' : '';
       appendLog('✅ 立场：' + (decision.vote === 'support' ? '支持加精' : '反对加精') + '，理由 ' + decision.reason.length + ' 字', 'done');
-      setStatus('已生成【' + (decision.vote === 'support' ? '支持加精' : '反对加精') + '】理由，可修改后点「填入投票」；脚本不会自动提交', 'ok');
+      setStatus('已生成【' + (decision.vote === 'support' ? '支持加精' : '反对加精') + '】理由' + searchNote + '，可修改后点「填入投票」；脚本不会自动提交', 'ok');
     } catch (e) {
       appendLog('❌ ' + (e.message || '生成失败'), 'warn');
       setStatus(e.message || '生成失败', 'error');
