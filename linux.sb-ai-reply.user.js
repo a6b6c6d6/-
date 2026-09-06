@@ -609,6 +609,34 @@
     gmSet('activeProfileIdx', (typeof idx === 'number' && idx >= 0) ? idx : -1);
   }
 
+  // 模型列表独立缓存：按 baseUrl 存最近一次拉取结果（{ [baseUrl]: [ids] }）。
+  // 与「预设自带 models」解耦：手动配置/未匹配到预设时拉取的模型也能在刷新后恢复；
+  // 命中预设时仍会同步写一份到预设，保留 per-预设覆盖能力。
+  function loadModelBaseCache() {
+    const v = gmGet('modelCacheByBase', {});
+    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  }
+  function saveModelBaseCache(map) {
+    gmSet('modelCacheByBase', map);
+  }
+  function getModelBaseCache(baseUrl) {
+    if (!baseUrl) return [];
+    const map = loadModelBaseCache();
+    const ids = map[baseUrl];
+    return Array.isArray(ids) ? ids : [];
+  }
+  function setModelBaseCache(baseUrl, ids) {
+    if (!baseUrl) return;
+    const map = loadModelBaseCache();
+    map[baseUrl] = Array.isArray(ids) ? ids : [];
+    // 防止无限增长：只保留最近 12 个站的缓存
+    const keys = Object.keys(map);
+    if (keys.length > 12) {
+      keys.slice(0, keys.length - 12).forEach((k) => delete map[k]);
+    }
+    saveModelBaseCache(map);
+  }
+
   // 提示词预设：数组 [{ name, systemPrompt, replySystemPrompt }]，第 0 条为通用默认。
   // 首次使用（无存储）时用内置清单种子化并落盘。
   function loadPrompts() {
@@ -684,17 +712,22 @@
     renderModelMenu('');
   }
 
-  // 载入时用「当前激活预设（按 baseUrl 匹配）」缓存的模型列表回填下拉
+  // 载入时回填模型下拉：优先「当前激活预设」自带缓存，其次「当前 baseUrl」的独立缓存。
   function populateModelListFromActiveProfile() {
     const profiles = loadProfiles();
+    const curBase = loadConfig().baseUrl;
     let idx = loadActiveProfileIdx();
-    if (!(idx >= 0 && profiles[idx])) {
-      const curBase = loadConfig().baseUrl;
+    // 同站一致性校验：索引指向的预设必须与已保存 baseUrl 同站，否则视为失效（如手动改过地址后未切换）
+    if (!(idx >= 0 && profiles[idx] && profiles[idx].baseUrl === curBase)) {
       idx = curBase ? profiles.findIndex((x) => x.baseUrl === curBase) : -1;
       if (idx >= 0) saveActiveProfileIdx(idx);
     }
     const p = profiles[idx];
-    if (p && Array.isArray(p.models)) populateModelList(p.models);
+    // 预设自带 models 优先；没有则回退到按 baseUrl 的独立缓存（手动配置/未匹配预设也能恢复）
+    const list = (p && Array.isArray(p.models) && p.models.length)
+      ? p.models
+      : getModelBaseCache(curBase);
+    if (list && list.length) populateModelList(list);
   }
 
   // 从当前 baseUrl/key 拉取模型列表（GET /models），填进下拉，并缓存到匹配的预设
@@ -734,10 +767,14 @@
         if (!ids.length) { setStatus('该中转站未返回模型列表（/models 为空或格式不支持），仍可手动输入', 'error'); return; }
         ids = Array.from(new Set(ids)).sort();
         populateModelList(ids);
-        // 缓存到当前激活预设（优先索引；同站多条预设时不会串），下次切回该预设直接有下拉
+        // 无条件写入「按 baseUrl」的独立缓存：即使当前配置没匹配到任何预设，刷新/切回该站后也能恢复
+        setModelBaseCache(baseUrl, ids);
+        // 同步到匹配的预设（索引指向的预设必须与当前表单 baseUrl 同站，避免手动改地址后写错对象）
         const profiles = loadProfiles();
         let idx = loadActiveProfileIdx();
-        if (!(idx >= 0 && profiles[idx])) idx = profiles.findIndex((p) => p.baseUrl === baseUrl);
+        if (!(idx >= 0 && profiles[idx] && profiles[idx].baseUrl === baseUrl)) {
+          idx = profiles.findIndex((p) => p.baseUrl === baseUrl);
+        }
         if (idx >= 0) { profiles[idx].models = ids; saveProfiles(profiles); }
         setStatus('已拉取 ' + ids.length + ' 个模型，点右侧 ▾ 展开选择/筛选', 'ok');
       },
@@ -1967,7 +2004,11 @@
     $('apiKey').value = p.apiKey || '';
     $('model').value = p.model || '';
     $('apiFormat').value = p.apiFormat || 'responses';
-    populateModelList(p.models || []); // 用该预设缓存的模型列表刷新下拉
+    // 用该预设缓存的模型列表刷新下拉；预设没存过则回退到「该站」的独立缓存（切到同站另一预设也不丢）
+    const cachedModels = (Array.isArray(p.models) && p.models.length)
+      ? p.models
+      : getModelBaseCache(p.baseUrl || '');
+    populateModelList(cachedModels);
     saveConfig(readConfigFromUI()); // 立即保存生效
     saveActiveProfileIdx(index); // 记录激活预设：后续「保存设置」按此索引同步，而不是按 baseUrl 猜
     closeProfileMenu();
