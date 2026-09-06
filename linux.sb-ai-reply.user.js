@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.10.0
+// @version      2.10.1
 // @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。支持客户端直连 Bing/DDG 联网搜索（免 Key）
 // @author       WorkBuddy
 // @match        https://linux.sb/*
@@ -589,7 +589,7 @@
     }
   }
 
-  // 中转站预设：数组 [{ name, baseUrl, apiKey, model, apiFormat }]
+  // 中转站预设：数组 [{ name, baseUrl, apiKey, model, apiFormat, models }]
   function loadProfiles() {
     const v = gmGet('profiles', []);
     return Array.isArray(v) ? v : [];
@@ -597,6 +597,16 @@
 
   function saveProfiles(list) {
     gmSet('profiles', list);
+  }
+
+  // 当前激活预设索引（-1 表示未激活/纯手动配置）。相比「按 baseUrl 猜激活项」更可靠：
+  // 同一中转站可存多条预设（同 baseUrl 不同 key/model），且改 baseUrl 后也能正确对应。
+  function loadActiveProfileIdx() {
+    const v = gmGet('activeProfileIdx', -1);
+    return (typeof v === 'number' && v >= 0) ? v : -1;
+  }
+  function saveActiveProfileIdx(idx) {
+    gmSet('activeProfileIdx', (typeof idx === 'number' && idx >= 0) ? idx : -1);
   }
 
   // 提示词预设：数组 [{ name, systemPrompt, replySystemPrompt }]，第 0 条为通用默认。
@@ -676,9 +686,14 @@
 
   // 载入时用「当前激活预设（按 baseUrl 匹配）」缓存的模型列表回填下拉
   function populateModelListFromActiveProfile() {
-    const curBase = loadConfig().baseUrl;
-    if (!curBase) return;
-    const p = loadProfiles().find((x) => x.baseUrl === curBase);
+    const profiles = loadProfiles();
+    let idx = loadActiveProfileIdx();
+    if (!(idx >= 0 && profiles[idx])) {
+      const curBase = loadConfig().baseUrl;
+      idx = curBase ? profiles.findIndex((x) => x.baseUrl === curBase) : -1;
+      if (idx >= 0) saveActiveProfileIdx(idx);
+    }
+    const p = profiles[idx];
     if (p && Array.isArray(p.models)) populateModelList(p.models);
   }
 
@@ -719,9 +734,10 @@
         if (!ids.length) { setStatus('该中转站未返回模型列表（/models 为空或格式不支持），仍可手动输入', 'error'); return; }
         ids = Array.from(new Set(ids)).sort();
         populateModelList(ids);
-        // 缓存到 baseUrl 匹配的预设，下次切回该预设直接有下拉
+        // 缓存到当前激活预设（优先索引；同站多条预设时不会串），下次切回该预设直接有下拉
         const profiles = loadProfiles();
-        const idx = profiles.findIndex((p) => p.baseUrl === baseUrl);
+        let idx = loadActiveProfileIdx();
+        if (!(idx >= 0 && profiles[idx])) idx = profiles.findIndex((p) => p.baseUrl === baseUrl);
         if (idx >= 0) { profiles[idx].models = ids; saveProfiles(profiles); }
         setStatus('已拉取 ' + ids.length + ' 个模型，点右侧 ▾ 展开选择/筛选', 'ok');
       },
@@ -1886,15 +1902,20 @@
     if (dd) dd.classList.remove('open');
   }
 
-  // 渲染自定义下拉：触发器标签 + 菜单项（每项自带重命名/删除），并按 baseUrl 自动识别激活项
+  // 渲染自定义下拉：触发器标签 + 菜单项（每项自带重命名/删除），并按激活索引/ baseUrl 自动识别激活项
   function refreshProfileSelect() {
     const menu = document.getElementById('lsb-ai-profile-menu');
     const cur = document.getElementById('lsb-ai-profile-current');
     if (!menu || !cur) return;
     const profiles = loadProfiles();
-    const curBase = loadConfig().baseUrl; // 当前已保存的 baseUrl，用于自动识别激活的预设
-    let matched = -1;
-    profiles.forEach((p, i) => { if (curBase && p.baseUrl === curBase && matched < 0) matched = i; });
+    const curBase = loadConfig().baseUrl; // 当前已保存的 baseUrl，用于兼容回退识别激活的预设
+    let matched = loadActiveProfileIdx(); // 优先用持久化的激活索引（切换/保存预设时维护）
+    if (matched < 0 || !profiles[matched]) {
+      // 无激活索引或索引失效（如旧数据/列表被改动）：按 baseUrl 兜底识别
+      matched = -1;
+      profiles.forEach((p, i) => { if (curBase && p.baseUrl === curBase && matched < 0) matched = i; });
+      if (matched >= 0) saveActiveProfileIdx(matched); // 兜底命中后补记索引，后续切换走索引
+    }
 
     // 触发器标签：激活预设名 / 有预设未匹配 / 无预设
     if (!profiles.length) cur.textContent = '（暂无预设）';
@@ -1948,6 +1969,7 @@
     $('apiFormat').value = p.apiFormat || 'responses';
     populateModelList(p.models || []); // 用该预设缓存的模型列表刷新下拉
     saveConfig(readConfigFromUI()); // 立即保存生效
+    saveActiveProfileIdx(index); // 记录激活预设：后续「保存设置」按此索引同步，而不是按 baseUrl 猜
     closeProfileMenu();
     refreshProfileSelect(); // 更新激活高亮 + 触发器标签
     setStatus('已切换到预设「' + (p.name || ('预设 ' + (index + 1))) + '」', 'ok');
@@ -1977,6 +1999,7 @@
       apiFormat: $('apiFormat').value
     });
     saveProfiles(profiles);
+    saveActiveProfileIdx(profiles.length - 1); // 新保存的预设即当前激活项，之后「保存设置」同步到它
     refreshProfileSelect();
     setStatus('已保存预设「' + name + '」', 'ok');
   }
@@ -2005,6 +2028,10 @@
     } catch (e) { /* confirm 不可用则直接删 */ }
     profiles.splice(index, 1);
     saveProfiles(profiles);
+    // 删除会影响后续索引：原激活项被删则置 -1（回落 baseUrl 识别），否则保持指向同一预设的项
+    const act = loadActiveProfileIdx();
+    if (act === index) saveActiveProfileIdx(-1);
+    else if (act > index) saveActiveProfileIdx(act - 1);
     refreshProfileSelect();
     setStatus('已删除预设「' + label + '」', 'ok');
   }
@@ -2475,15 +2502,22 @@
     document.getElementById('lsb-ai-save').addEventListener('click', () => {
       const cfg = readConfigFromUI();
       saveConfig(cfg);
-      // 若当前配置匹配到某个预设（按 baseUrl 识别，与激活高亮一致），把改动同步回该预设
+      // 把改动同步回「当前激活预设」：优先用持久化的激活索引（切换/存为预设时记录）。
+      // 这样即便改了 baseUrl、或同站存了多条预设，改动也会正确落回正在用的那条，切走再切回不丢失。
       const profiles = loadProfiles();
-      const idx = cfg.baseUrl ? profiles.findIndex((p) => p.baseUrl === cfg.baseUrl) : -1;
+      let idx = loadActiveProfileIdx();
+      if (!(idx >= 0 && profiles[idx])) {
+        // 无激活索引或已失效：按 baseUrl 兜底匹配（兼容旧数据/手动配置）
+        idx = cfg.baseUrl ? profiles.findIndex((p) => p.baseUrl === cfg.baseUrl) : -1;
+      }
       if (idx >= 0) {
         const p = profiles[idx];
+        p.baseUrl = cfg.baseUrl;
         p.apiKey = cfg.apiKey;
         p.model = cfg.model;
         p.apiFormat = cfg.apiFormat;
         saveProfiles(profiles); // name / models 缓存保留不动
+        saveActiveProfileIdx(idx); // 无论走索引还是 baseUrl 兜底，命中后都补记，后续稳定
         refreshProfileSelect();
         setStatus('设置已保存，并同步到预设「' + (p.name || ('预设 ' + (idx + 1))) + '」', 'ok');
       } else {
