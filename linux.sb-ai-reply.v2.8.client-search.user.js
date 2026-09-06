@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         水贴专用（Linux.sb AI 回帖助手）
 // @namespace    https://linux.sb/
-// @version      2.10.0
-// @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 助手悬浮按钮，支持「水评论 / 水投票（精华加精评议，半自动）」双模式；抓取帖子内容调用自定义 AI API 生成回复或投票理由，并填入对应表单。支持客户端直连 Bing/DDG 联网搜索（免 Key）
+// @version      2.8.0
+// @description  水贴专用：在 linux.sb（烧饼社区）帖子页注入 AI 回帖悬浮按钮，抓取帖子内容并调用自定义 AI API 生成回复，自动填入回复编辑器
 // @author       WorkBuddy
 // @match        https://linux.sb/*
 // @grant        GM_xmlhttpRequest
@@ -231,20 +231,6 @@
       border: 1px solid #bfdbfe;
       border-radius: 8px;
     }
-    /* 水评论 / 水投票 模式切换 */
-    .lsb-mode-switch { display: flex; gap: 6px; }
-    .lsb-mode-btn {
-      flex: 1; padding: 8px 0; border: 1px solid #d1d5db; border-radius: 8px;
-      background: #f3f4f6; color: #4b5563; font-size: 13px; font-weight: 600;
-      cursor: pointer; font-family: inherit; transition: all .15s ease;
-    }
-    .lsb-mode-btn:hover { background: #e5e7eb; }
-    .lsb-mode-btn.is-active { background: #2563eb; border-color: #2563eb; color: #fff; }
-    .lsb-vote-info {
-      padding: 7px 9px; font-size: 12px; line-height: 1.5; color: #1e40af;
-      background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; word-break: break-all;
-    }
-    .lsb-vote-info.lsb-empty { background: #f9fafb; border-color: #e5e7eb; color: #9ca3af; }
     .lsb-ai-textarea { resize: vertical; min-height: 60px; }
 
     .lsb-ai-btn {
@@ -1157,7 +1143,6 @@
 
   // 选中某条评论作为目标，高亮、展开面板、更新状态
   function setTarget(post) {
-    if (currentMode === 'vote') return; // 水投票模式不选评论目标
     document.querySelectorAll('li.lsb-target-highlight').forEach(el => el.classList.remove('lsb-target-highlight'));
     currentTarget = {
       post: post,
@@ -1265,44 +1250,6 @@
     }
     if (!chunks.length) throw new Error('响应内容为空：SSE 流中无 text_delta');
     return chunks.join('');
-  }
-
-  // 通用兜底解析：尝试解析一段响应体（JSON 或 SSE），自动探测 responses / chat / anthropic 三种结构。
-  // 用于所选 apiFormat 与实际中转返回结构不一致的场景，避免「格式对不上→整个输出不可见」。
-  function parseAnyBody(raw) {
-    const t = String(raw == null ? '' : raw).trim();
-    const errs = [];
-    // 1) SSE 形态（含 data: 前缀行）→ anthropic 专用与通用行级 delta 收集
-    if (/^\s*data:/m.test(t)) {
-      const collected = [];
-      t.split(/\r?\n/).forEach((line) => {
-        if (!line.startsWith('data:')) return;
-        const payload = line.slice(5).trim();
-        if (!payload || payload === '[DONE]') return;
-        let j;
-        try { j = JSON.parse(payload); } catch (e) { return; }
-        if (!j || typeof j !== 'object') return;
-        // anthropic text_delta
-        if (j.type === 'content_block_delta' && j.delta && j.delta.type === 'text_delta' && typeof j.delta.text === 'string') { collected.push(j.delta.text); return; }
-        // chat delta.content
-        const c = j.choices && j.choices[0];
-        if (c && (c.delta || c.message) && typeof ((c.delta || c.message).content) === 'string') { collected.push((c.delta || c.message).content); return; }
-        // responses output_text.delta
-        if (j.type && /output_text\.delta/.test(j.type) && typeof j.delta === 'string') { collected.push(j.delta); return; }
-      });
-      if (collected.length) return collected.join('');
-    }
-    // 2) 整体 JSON：按 responses → chat → anthropic 顺序尝试
-    let data = null;
-    try { data = JSON.parse(t); } catch (e) { errs.push(e.message); }
-    if (data) {
-      if (data.output_text != null || Array.isArray(data.output)) { try { return parseResponses(data); } catch (e) { errs.push(e.message); } }
-      if (data.choices) { try { return parseChat(data); } catch (e) { errs.push(e.message); } }
-      if (Array.isArray(data.content)) { try { return parseAnthropicJson(data); } catch (e) { errs.push(e.message); } }
-      // 最后兜底：error 字段要暴露
-      if (data.error) throw new Error(String(data.error.message || data.error.type || JSON.stringify(data.error)));
-    }
-    throw new Error(errs[0] || '响应解析失败：无法识别任何已知响应结构');
   }
 
   function apiErrorMessage(status, bodyText) {
@@ -1420,7 +1367,7 @@
 
     if (isAnthropic) {
       url = joinUrl(cfg.baseUrl, 'messages');
-      headers = Object.assign({}, { 'User-Agent': CLIENT_UA, 'Accept': 'text/event-stream' }, { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' });
+      headers = Object.assign({}, { 'User-Agent': CLIENT_UA }, { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' });
       const content = useImages
         ? [{ type: 'text', text: opts.userContent }].concat(opts.images.map(u => ({ type: 'image', source: { type: 'url', url: u } })))
         : opts.userContent;
@@ -1428,7 +1375,7 @@
       if (opts.tools) body.tools = opts.tools;
     } else if (isChat) {
       url = joinUrl(cfg.baseUrl, 'chat/completions');
-      headers = Object.assign({}, { 'User-Agent': CLIENT_UA, 'Accept': 'text/event-stream' }, { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' });
+      headers = Object.assign({}, { 'User-Agent': CLIENT_UA }, { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' });
       const content = useImages
         ? [{ type: 'text', text: opts.userContent }].concat(opts.images.map(u => ({ type: 'image_url', image_url: { url: u } })))
         : opts.userContent;
@@ -1436,7 +1383,7 @@
       if (opts.tools) body.tools = opts.tools;
     } else {
       url = joinUrl(cfg.baseUrl, 'responses');
-      headers = Object.assign({}, { 'User-Agent': CLIENT_UA, 'Accept': 'text/event-stream' }, { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' });
+      headers = Object.assign({}, { 'User-Agent': CLIENT_UA }, { 'Authorization': 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' });
       const content = useImages
         ? [{ type: 'input_text', text: opts.userContent }].concat(opts.images.map(u => ({ type: 'input_image', image_url: u })))
         : opts.userContent;
@@ -1469,26 +1416,19 @@
           if (status >= 200 && status < 300) {
             try {
               let text;
-              if (req.isAnthropic && raw.trimStart().startsWith('{')) {
-                text = parseAnthropicJson(JSON.parse(raw));
+              if (req.isAnthropic) {
+                text = raw.trimStart().startsWith('{')
+                  ? parseAnthropicJson(JSON.parse(raw))
+                  : parseAnthropicSse(raw);
               } else if (req.isChat) {
                 text = parseChat(JSON.parse(raw));
-              } else if (!req.isAnthropic) {
+              } else {
                 text = parseResponses(JSON.parse(raw));
               }
-              // 严格按所选格式解析失败或没进任何分支 → 交给通用兜底（兼容格式错配/SSE 非流形态）
-              if (text === undefined) text = parseAnyBody(raw);
               const searched = /web_search/i.test(raw);
               resolve({ text: text.trim(), searched });
             } catch (e) {
-              // 所选格式解析失败：换通用兜底再试一次，仍失败才报错（不改 retriable）
-              try {
-                const text = parseAnyBody(raw);
-                const searched = /web_search/i.test(raw);
-                resolve({ text: text.trim(), searched });
-              } catch (e2) {
-                reject(new Error(e2.message || e.message || '响应解析失败'));
-              }
+              reject(new Error(e.message || '响应解析失败')); // 解析失败不重试
             }
           } else {
             const err = new Error(apiErrorMessage(status, raw));
@@ -1520,7 +1460,6 @@
   }
 
   // 从一行 SSE 数据里抽出增量文本（按三格式分别解析），非文本增量返回 ''
-  // 注意：不依赖 req.isChat/isAnthropic 开关，按实际报文结构探测——多中转站/多格式下更稳
   function extractStreamDelta(line, req) {
     let s = String(line || '').trim();
     if (!s || s.startsWith('event:') || s.startsWith(':')) return '';
@@ -1528,29 +1467,17 @@
     if (!s || s === '[DONE]') return '';
     let j;
     try { j = JSON.parse(s); } catch (e) { return ''; }
-    if (!j || typeof j !== 'object') return '';
-    // 1) Anthropic: content_block_delta → text_delta / thinking_delta（思考过程不入正文）
-    if (j.type === 'content_block_delta' && j.delta && typeof j.delta === 'object') {
-      if (j.delta.type === 'text_delta' && typeof j.delta.text === 'string') return j.delta.text;
+    if (req.isAnthropic) {
+      // content_block_delta → delta.text（text_delta）
+      if (j.type === 'content_block_delta' && j.delta && typeof j.delta.text === 'string') return j.delta.text;
       return '';
     }
-    // 2) OpenAI Chat: choices[0].delta.content；reasoning_content 不入正文（claude 思维链经 chat 格式）
-    if (Array.isArray(j.choices)) {
-      const c = j.choices[0];
-      if (!c) return '';
-      const d = c.delta || c.message || {};
-      if (typeof d.content === 'string') return d.content;
-      // 部分中转把内容放在 delta.reasoning_content，且 model 思考完成后才给 content；思考期返回 ''，避免污染
-      if (typeof d.reasoning_content === 'string') return '';
-      return '';
+    if (req.isChat) {
+      const d = j.choices && j.choices[0] && j.choices[0].delta;
+      return (d && typeof d.content === 'string') ? d.content : '';
     }
-    // 3) Responses API: response.output_text.delta（delta 为字符串）；reasoning 事件不入正文
-    if (j.type && /output_text\.delta/.test(j.type)) {
-      return typeof j.delta === 'string' ? j.delta : '';
-    }
-    // 4) 兜底：直接 {delta: "..."} / {text: "..."}
-    if (typeof j.delta === 'string') return j.delta;
-    if (typeof j.text === 'string') return j.text;
+    // responses：response.output_text.delta 事件，delta 为字符串
+    if (typeof j.delta === 'string' && (!j.type || /output_text\.delta/.test(j.type))) return j.delta;
     return '';
   }
 
@@ -1591,7 +1518,7 @@
               if (d) { full += d; try { onToken(d); } catch (_) { /* 忽略 */ } }
             });
             if (full.trim()) { resolve({ text: full.trim(), searched: /web_search/i.test(raw) }); return; }
-            // 没流出来 → 退回整体解析（服务端可能忽略了 stream）；失败再走通用兜底
+            // 没流出来 → 退回整体解析（服务端可能忽略了 stream）
             try {
               let text;
               if (req.isAnthropic) {
@@ -1603,12 +1530,7 @@
               }
               resolve({ text: text.trim(), searched: /web_search/i.test(raw) });
             } catch (e) {
-              try {
-                const text = parseAnyBody(raw);
-                resolve({ text: text.trim(), searched: /web_search/i.test(raw) });
-              } catch (e2) {
-                reject(new Error(e2.message || e.message || '响应解析失败'));
-              }
+              reject(new Error(e.message || '响应解析失败'));
             }
           } else {
             const err = new Error(apiErrorMessage(status, raw));
@@ -1782,8 +1704,6 @@
   let logWrapEl = null;
   let logBodyEl = null;
   let logIdx = 0;
-  let currentMode = 'comment'; // 'comment' 水评论 | 'vote' 水投票（精华评议，半自动）
-  let lastVoteDecision = null; // 最近一次投票决定 { vote:'support'|'oppose', reason }
 
   function setStatus(msg, type) {
     if (!statusEl) return;
@@ -1823,7 +1743,7 @@
     if (!generateBtn) return;
     generateBtn.disabled = on;
     if (on) {
-      generateBtn.textContent = (currentMode === 'vote') ? '正在生成投票理由…' : '正在生成回复…（最长 180 秒，请耐心等待）';
+      generateBtn.textContent = '正在生成回复…（最长 180 秒，请耐心等待）';
     } else {
       updateGenerateBtnText(); // 恢复为动态文案（有目标/无目标）
     }
@@ -2172,19 +2092,6 @@
         <button type="button" class="lsb-ai-close" title="关闭">×</button>
       </div>
       <div class="lsb-ai-body">
-        <div class="lsb-mode-switch" id="lsb-ai-mode-switch">
-          <button type="button" class="lsb-mode-btn is-active" data-mode="comment">💬 水评论</button>
-          <button type="button" class="lsb-mode-btn" data-mode="vote">🗳️ 水投票（精华评议）</button>
-        </div>
-        <div class="lsb-ai-row" id="lsb-ai-vote-box" style="display:none">
-          <div class="lsb-vote-info lsb-empty" id="lsb-ai-vote-info">正在检测本帖精华投票…</div>
-          <label class="lsb-ai-label">投票立场（理由据此生成）</label>
-          <select class="lsb-ai-select" id="lsb-ai-vote-stance">
-            <option value="auto" selected>AI 读帖判断支持 / 反对</option>
-            <option value="support">一律支持加精</option>
-            <option value="oppose">一律反对加精</option>
-          </select>
-        </div>
         <div class="lsb-target-info lsb-empty" id="lsb-ai-target-info">
           <span id="lsb-ai-target-text">尚未选择目标评论，点任意评论旁的「水它」按钮</span>
           <button type="button" class="lsb-target-clear" id="lsb-ai-target-clear" style="display:none">取消</button>
@@ -2223,7 +2130,7 @@
         </div>
 
         <div class="lsb-ai-row">
-          <label class="lsb-ai-label" id="lsb-ai-preview-label">回复预览（可编辑）</label>
+          <label class="lsb-ai-label">回复预览（可编辑）</label>
           <textarea class="lsb-ai-textarea lsb-ai-preview" id="lsb-ai-preview" placeholder="生成的回复将显示在此处，可手动修改"></textarea>
         </div>
 
@@ -2402,10 +2309,6 @@
     generateBtn.addEventListener('click', onGenerate);
     document.getElementById('lsb-ai-target-clear').addEventListener('click', clearTarget);
     document.getElementById('lsb-ai-fill').addEventListener('click', onFill);
-    document.getElementById('lsb-ai-mode-switch').addEventListener('click', (e) => {
-      const btn = e.target.closest ? e.target.closest('.lsb-mode-btn') : null;
-      if (btn) switchMode(btn.getAttribute('data-mode'));
-    });
 
     // 中转站预设：自定义下拉（切换 / 重命名 / 删除 / 存为）
     const profileDd = document.getElementById('lsb-ai-profile-dd');
@@ -2632,7 +2535,6 @@
   // 根据有无目标评论，动态更新生成按钮文案
   function updateGenerateBtnText() {
     if (!generateBtn) return;
-    if (currentMode === 'vote') { generateBtn.textContent = '读帖并生成投票理由'; return; }
     if (currentTarget) {
       const floor = currentTarget.floor ? ('#' + currentTarget.floor + ' ') : '';
       generateBtn.textContent = '抓取并生成回应（' + floor + '@' + currentTarget.username + '）';
@@ -2644,7 +2546,6 @@
   // 生成入口：有目标评论走「针对评论回应」，否则走「总结式回复」
   async function onGenerate() {
     if (generateBtn && generateBtn.disabled) return; // 禁止重复点击
-    if (currentMode === 'vote') { await doGenerateVote(); return; }
     if (currentTarget) {
       await doGenerateReply();
     } else {
@@ -2785,7 +2686,6 @@
   }
 
   function onFill() {
-    if (currentMode === 'vote') { fillVote(); return; }
     const text = previewEl.value.trim();
     if (!text) {
       setStatus('预览区为空，请先生成回复或手动输入内容', 'error');
@@ -2793,201 +2693,6 @@
     }
     // 回应模式（有 @ 关系）由脚本拼上 @前缀；总结式回复 replyPrefix 为空，不带前缀
     fillEditor(replyPrefix + text);
-  }
-
-  /* ============================================================
-   * 9.5 水投票（精华加精评议，半自动：生成+选好+填好，人点提交）
-   * ============================================================ */
-
-  const VOTE_SYSTEM_PROMPT = [
-    '你是技术论坛「精华申请」社区投票的评议助手。请根据帖子正文判断它是否值得被加为精华，并写一条会公开发布的投票理由（评议回帖）。',
-    '判断维度（综合看，不唯单一指标）：信息与技术含量、原创与实践价值、结构是否清晰完整、对他人是否有长期参考价值；营销软文、无实质内容、重复搬运、事实错误或无法自洽的应反对。',
-    '理由要求：中文、自然口语、紧扣帖子具体内容（点出具体优点或问题，不要空喊“好文/支持”），80-200 字，不要 Markdown 标题或列表符号，不要出现“作为 AI”之类表述。',
-    '只输出一个 JSON 对象，不要输出任何额外文字或代码块标记：{"vote":"support","reason":"你的理由"}。vote 只能是 support（支持加精）或 oppose（反对加精）。'
-  ].join('\n');
-
-  // 读取首楼精华投票面板，返回结构化信息；没有面板返回 null
-  function getVotePanel() {
-    const panel = document.querySelector('section[data-topic-essence-review]');
-    if (!panel) return null;
-    const form = panel.querySelector('form.topic-essence-review-vote-form');
-    const status = panel.getAttribute('data-status') || '';
-    const metas = Array.from(panel.querySelectorAll('.topic-essence-review-meta span'))
-      .map(x => (x.textContent || '').trim()).filter(Boolean);
-    const prog = panel.querySelector('.topic-essence-review-progress-row strong');
-    const statusLabel = panel.querySelector('.topic-essence-review-status');
-    return {
-      panel: panel,
-      form: form,
-      status: status,
-      canVote: status === 'voting' && !!form,
-      progressText: prog ? prog.textContent.trim() : '',
-      statusText: statusLabel ? statusLabel.textContent.trim() : '',
-      metas: metas
-    };
-  }
-
-  // 刷新投票状态行
-  function refreshVoteInfo() {
-    const box = document.getElementById('lsb-ai-vote-info');
-    if (!box) return;
-    const v = getVotePanel();
-    if (!v) { box.className = 'lsb-vote-info lsb-empty'; box.textContent = '本帖没有精华申请面板（只有处于申精流程的帖子才能投票）'; return; }
-    if (!v.canVote) { box.className = 'lsb-vote-info lsb-empty'; box.textContent = '本帖精华评议已结束（状态：' + (v.statusText || v.status) + '），不能再投票'; return; }
-    box.className = 'lsb-vote-info';
-    box.textContent = '投票中 ' + v.progressText + (v.metas.length ? '　' + v.metas.join(' · ') : '');
-  }
-
-  // 宽松解析模型输出的 {vote, reason}；forcedStance 为 support/oppose 时强制覆盖立场
-  function parseVoteDecision(text, forcedStance) {
-    const raw = String(text == null ? '' : text).trim();
-    let obj = null;
-    try { obj = JSON.parse(raw); } catch (e) {
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (m) { try { obj = JSON.parse(m[0]); } catch (e2) { obj = null; } }
-    }
-    // 非 JSON（模型没按格式输出）时，用文本启发式判断立场，避免一律误判为 support
-    const detectVoteFromText = (txt) => {
-      const s = String(txt || '').toLowerCase();
-      // 明确反对信号优先
-      if (/(不支持|不推荐|不建议|反对|不赞同|不应|不建议加精|不足以|不够格|无实质|营销|软文|抄袭|重复搬运|事实错误|不配|差评|否决|op\s*pose|against|not\s*worth|no\s*way)/.test(s)) return 'oppose';
-      // 明确支持信号
-      if (/(支持|推荐|赞同|建议加精|值得|够格|干货|精品|好文|加分|support|recommend|agree|worth)/.test(s)) return 'support';
-      return null; // 没有明确信号
-    };
-    // 单字段立场值识别：support/oppose/agree/yes… 或空白
-    const parseVoteValue = (v) => {
-      const rv = String(v == null ? '' : v).trim().toLowerCase();
-      if (!rv) return null;
-      if (/(^|\W)(oppose|against|no|false|disagree)\W*$/.test(rv) || rv.indexOf('反对') >= 0) return 'oppose';
-      if (/(^|\W)(support|agree|yes|true)\W*$/.test(rv) || rv.indexOf('支持') >= 0) return 'support';
-      return null;
-    };
-    let vote = null;
-    let reason = raw;
-    if (obj && typeof obj === 'object') {
-      // 先看结构化 vote 字段，再看全文启发式，最后才落默认
-      vote = parseVoteValue(obj.vote) || parseVoteValue(obj.choice) || parseVoteValue(obj.stance) || detectVoteFromText(raw);
-      if (typeof obj.reason === 'string' && obj.reason.trim()) reason = obj.reason.trim();
-    } else {
-      // 无 JSON / JSON 解析失败：对全文做启发式（含反引号/引号包裹的纯文本）
-      const plain = raw.replace(/^```(json)?\s*/i, '').replace(/\s*```$/, '');
-      const d2 = detectVoteFromText(plain);
-      if (d2) { vote = d2; reason = plain; }
-    }
-    if (!vote) vote = 'support'; // 仍无信号才默认支持
-    if (forcedStance === 'support' || forcedStance === 'oppose') vote = forcedStance;
-    reason = String(reason || '').replace(/```/g, '').trim().slice(0, 300); // textarea maxlength=300
-    return { vote: vote, reason: reason, parsedJson: !!obj };
-  }
-
-  // 水投票生成：抓首楼 -> AI 出立场+理由 -> 进预览区（不提交）
-  async function doGenerateVote() {
-    const v0 = getVotePanel();
-    if (!v0 || !v0.canVote) {
-      setStatus(!v0 ? '本帖没有进行中的精华投票，无法水投票' : '该帖精华投票已结束（' + (v0.statusText || v0.status) + '）', 'error');
-      return;
-    }
-    const cfg = readConfigFromUI();
-    saveConfig(cfg);
-    const err = validateConfig(cfg);
-    if (err) { setStatus(err, 'error'); document.getElementById('lsb-ai-settings').open = true; return; }
-
-    let scraped;
-    try {
-      // 投票理由针对帖子本身，固定抓首楼（楼主正文），不受评论范围/目标评论影响
-      scraped = scrapePosts('first', false, cfg.maxContextChars, false);
-    } catch (e) { setStatus(e.message, 'error'); return; }
-
-    setGenerating(true);
-    previewEl.classList.remove('lsb-success');
-    previewEl.value = '';
-    lastVoteDecision = null;
-    clearLog(); showLog(true); logWrapEl.classList.remove('collapsed');
-    appendLog('水投票：读取首楼内容，让 AI 判断立场并撰写评议理由…');
-    try {
-      const stanceSel = document.getElementById('lsb-ai-vote-stance');
-      const forced = stanceSel ? stanceSel.value : 'auto';
-      const userContent = '下面是论坛帖子内容，请判断它是否值得加精，并严格按系统要求只输出 JSON。\n\n' + scraped.text;
-      const voteCfg = Object.assign({}, cfg, { systemPrompt: VOTE_SYSTEM_PROMPT, enableSearch: false });
-      const req = buildRequest(voteCfg, { system: VOTE_SYSTEM_PROMPT, userContent: userContent, images: undefined, tools: undefined });
-      const r = await sendRequest(req, (n, max, e, wait) =>
-        reportProgress('生成失败（' + e.message + '），' + (wait / 1000) + 's 后重试 ' + n + '/' + max + '…', 'warn'));
-      const decision = parseVoteDecision(r.text, forced === 'auto' ? null : forced);
-      if (!decision.reason) throw new Error('模型未返回有效投票理由，请重试');
-      lastVoteDecision = decision;
-      previewEl.value = decision.reason;
-      previewEl.classList.add('lsb-success');
-      appendLog('✅ 立场：' + (decision.vote === 'support' ? '支持加精' : '反对加精') + '，理由 ' + decision.reason.length + ' 字', 'done');
-      setStatus('已生成【' + (decision.vote === 'support' ? '支持加精' : '反对加精') + '】理由，可修改后点「填入投票」；脚本不会自动提交', 'ok');
-    } catch (e) {
-      appendLog('❌ ' + (e.message || '生成失败'), 'warn');
-      setStatus(e.message || '生成失败', 'error');
-    } finally {
-      setGenerating(false);
-    }
-  }
-
-  // 水投票填入：选好对应单选项 + 把理由写进投票表单 reason；绝不提交
-  function fillVote() {
-    const reason = previewEl.value.trim();
-    if (!reason) { setStatus('预览区为空，请先生成投票理由或手动输入', 'error'); return; }
-    if (!isLoggedIn()) { setStatus('当前未登录，请先登录 linux.sb 再投票', 'error'); return; }
-    const v = getVotePanel();
-    if (!v || !v.canVote || !v.form) { setStatus('没找到进行中的投票表单（可能已结束），无法填入', 'error'); return; }
-    // 立场优先级：当前下拉框选择（support/oppose 硬选）> 本次生成决定 > 默认 support
-    const stanceSel = document.getElementById('lsb-ai-vote-stance');
-    const stance = stanceSel ? stanceSel.value : 'auto';
-    let vote = null;
-    if (stance === 'support' || stance === 'oppose') {
-      vote = stance;
-    } else {
-      vote = (lastVoteDecision && lastVoteDecision.vote) || 'support';
-    }
-    const radio = v.form.querySelector('input[name="vote"][value="' + vote + '"]');
-    if (!radio) { setStatus('投票表单里找不到 ' + vote + ' 选项', 'error'); return; }
-    // 用 click 模拟真人选择，确保页面框架感知到单选项变化
-    if (!radio.checked) {
-      try { radio.click(); } catch (e) { radio.checked = true; radio.dispatchEvent(new Event('change', { bubbles: true })); }
-    }
-    const ta = v.form.querySelector('textarea[name="reason"]');
-    if (!ta) { setStatus('投票表单里找不到理由输入框', 'error'); return; }
-    const finalReason = reason.slice(0, 300);
-    setNativeValue(ta, finalReason);
-    try { v.form.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
-    ta.focus();
-    setStatus('已选【' + (vote === 'support' ? '支持加精' : '反对加精') + '】并填入 ' + finalReason.length + ' 字理由；确认无误后请手动点页面上的「提交投票」（脚本不会代提交）', 'ok');
-  }
-
-  // 切换水评论 / 水投票模式，联动显隐与文案
-  function switchMode(mode) {
-    if (mode !== 'vote') mode = 'comment';
-    const changed = (mode !== currentMode);
-    currentMode = mode;
-    document.querySelectorAll('#lsb-ai-mode-switch .lsb-mode-btn').forEach(b =>
-      b.classList.toggle('is-active', b.getAttribute('data-mode') === mode));
-    // 切换模式：清掉可能残留的另一模式产物，避免串料（评论草稿≠投票理由）
-    if (changed) {
-      if (previewEl) { previewEl.value = ''; previewEl.classList.remove('lsb-success'); }
-      lastVoteDecision = null;
-      replyPrefix = '';
-      if (mode === 'vote') clearTarget(); // 投票模式不选评论目标，同时复位目标态 UI
-      setStatus('已切换至「' + (mode === 'vote' ? '水投票（精华评议）' : '水评论') + '」模式，原预览内容已清空', 'info');
-    }
-    const voteBox = document.getElementById('lsb-ai-vote-box');
-    const targetBox = document.getElementById('lsb-ai-target-info');
-    const scopeRow = document.getElementById('lsb-ai-scope-row');
-    const scopeTip = document.getElementById('lsb-ai-scope-tip');
-    if (voteBox) voteBox.style.display = (mode === 'vote') ? '' : 'none';
-    if (targetBox) targetBox.style.display = (mode === 'vote') ? 'none' : '';
-    if (scopeRow) scopeRow.style.display = (mode === 'vote') ? 'none' : '';
-    if (scopeTip) scopeTip.style.display = (mode === 'vote') ? 'none' : '';
-    const fillBtn = document.getElementById('lsb-ai-fill');
-    if (fillBtn) fillBtn.textContent = (mode === 'vote') ? '填入投票（不自动提交）' : '填入编辑器';
-    const previewLabel = document.getElementById('lsb-ai-preview-label');
-    if (previewLabel) previewLabel.textContent = (mode === 'vote') ? '投票理由预览（可编辑，≤300字）' : '回复预览（可编辑）';
-    updateGenerateBtnText();
-    if (mode === 'vote') refreshVoteInfo();
   }
 
   /* ============================================================
